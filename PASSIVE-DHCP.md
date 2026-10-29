@@ -4,6 +4,8 @@ The optional DHCP provider learns from packets visible on a chosen Linux LAN int
 
 The separate collector writes a private observation snapshot. The unprivileged `dhcp` provider reads that file and feeds the normal merge and YAPD integration.
 
+The same process can optionally observe ARP for devices that do not use DHCP. See [PASSIVE-ARP.md](PASSIVE-ARP.md); it writes a separate snapshot and requires an additional `arp` provider.
+
 ## What it learns
 
 - DISCOVER, REQUEST and INFORM: Ethernet client MAC and optional hostname. Requested IPs never establish an assigned IP.

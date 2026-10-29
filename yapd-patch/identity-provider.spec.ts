@@ -58,3 +58,12 @@ test("expired passive identity is removed while native Pi-hole history remains",
   assert.deepEqual(liveExternalDevices([observed]), []);
   assert.deepEqual(mergeExternalClients([], [observed], new Map(), baseline, false), []);
 });
+test("ARP discoveries are visibly observational and do not assert static configuration", () => {
+  const arp: IdentityDevice = { ...device, name: "", active: null, isStatic: null,
+    identityKind: "observation", protocols: ["arp"] };
+  const [row] = mergeExternalClients([], [arp], new Map(), baseline, false, "Passive ARP");
+  assert.ok(row?.tags.includes("Observed: ARP"));
+  assert.ok(row?.tags.includes("Observed identity"));
+  assert.ok(!row?.tags.includes("DHCP reservation"));
+  assert.equal(row?.numQueries, 0);
+});

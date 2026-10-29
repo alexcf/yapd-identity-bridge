@@ -58,6 +58,9 @@ def validate_inventory(inventory, allow_stale=False):
         for field in ('active', 'isStatic'):
             if device.get(field) is not None and type(device[field]) is not bool:
                 raise ValueError('Invalid identity state')
+        protocols=device.get('protocols',[])
+        if not isinstance(protocols,list) or len(protocols)>2 or any(p not in ('dhcp','arp') for p in protocols):
+            raise ValueError('Invalid passive protocol labels')
         if 'expiresAt' in device:
             timestamp(device['expiresAt'])
         deadlines = device.get('ipExpiresAt', {})

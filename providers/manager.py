@@ -86,6 +86,8 @@ def merge(sources):
             'stale':any(c[3]['status'] in ('cached','unavailable') for c in top),
             'sources':[{'id':c[0].id, 'type':c[0].type, 'retrievedAt':c[3]['retrievedAt'],
                         'status':c[3]['status']} for c in sorted(candidates,key=lambda c:c[0].id)]}
+        protocols=sorted({p for c in candidates for p in c[2].get('protocols',[])})
+        if protocols:device['protocols']=protocols
         # Preserve each address's lifetime when equal-priority observers merge.
         if all(c[2].get('expiresAt') for c in top):
             device['expiresAt']=max((c[2]['expiresAt'] for c in top),key=timestamp)

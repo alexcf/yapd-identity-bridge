@@ -14,6 +14,7 @@ export type IdentityDevice = {
   stale?: boolean;
   expiresAt?: string;
   ipExpiresAt?: Record<string, string>;
+  protocols?: ("dhcp" | "arp")[];
   sources?: { id: string; type: string; retrievedAt: string; status: string }[];
 };
 type Snapshot = { version: number; retrievedAt: string; provider: string; devices: IdentityDevice[] };
@@ -44,6 +45,8 @@ export function readExternalIdentity(): Snapshot & { stale: boolean } {
           (device.identityKind !== undefined && !["binding", "observation"].includes(device.identityKind)) ||
           (device.retrievedAt !== undefined && !Number.isFinite(Date.parse(device.retrievedAt))) ||
           (device.expiresAt !== undefined && !Number.isFinite(Date.parse(device.expiresAt))) ||
+          (device.protocols !== undefined && (!Array.isArray(device.protocols) || device.protocols.length > 2 ||
+            device.protocols.some(protocol => !["dhcp", "arp"].includes(protocol)))) ||
           (device.ipExpiresAt !== undefined && (device.ipExpiresAt === null || typeof device.ipExpiresAt !== "object" ||
             Array.isArray(device.ipExpiresAt) || Object.entries(device.ipExpiresAt).some(([ip, deadline]) =>
               !device.ips.includes(ip) || typeof deadline !== "string" || !Number.isFinite(Date.parse(deadline))))) ||
@@ -83,6 +86,7 @@ export function mergeExternalClients(
       ? Date.now() - Date.parse(device.retrievedAt) > 15 * 60_000 : stale);
     const tags = [...new Set([...(manual?.tags ?? native?.tags ?? []), provider,
       ...(device.sources?.map(source => "Source: " + source.type) ?? []),
+      ...(device.protocols?.map(protocol => "Observed: " + protocol.toUpperCase()) ?? []),
       observation ? "Observed identity" : device.isStatic ? "DHCP reservation" : "Dynamic lease",
       ...(!native ? ["Activity not correlated", "Policy not correlated"] : []),
       ...(deviceStale ? [observation ? "Identity data stale" : "DHCP data stale"] : [])])];

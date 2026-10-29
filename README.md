@@ -1,6 +1,6 @@
 # YAPD Identity Bridge
 
-Bring device identities from **MikroTik, Prometheus, passive DHCP, or another inventory collector** into [YAPD](https://github.com/leufrasiojunior/yadp). Show useful device names in Clients and query logs, combine multiple sources with explicit precedence, and optionally replicate local DNS records across Pi-hole v6 instances.
+Bring device identities from **MikroTik, Prometheus, passive DHCP/ARP, or another inventory collector** into [YAPD](https://github.com/leufrasiojunior/yadp). Show useful device names in Clients and query logs, combine multiple sources with explicit precedence, and optionally replicate local DNS records across Pi-hole v6 instances.
 
 The bridge has a provider SDK, a small reconciliation worker, and a version-pinned YAPD backend patch. Providers collect data; the shared core validates, merges, and publishes it. New sources can be added without changing the dashboard integration.
 
@@ -11,6 +11,7 @@ The bridge has a provider SDK, a small reconciliation worker, and a version-pinn
 | **MikroTik** | DHCP leases and static DNS over RouterOS HTTPS REST | Authoritative lease bindings, device names, local DNS | Yes |
 | **Prometheus** | An instant query against metrics with explicit device labels | Observed identities and supplementary names | No |
 | **Passive DHCP** | DHCPv4 traffic visible on a Linux LAN interface | Expiring observed MACs, names and allowlisted ACK addresses | No |
+| **Passive ARP** | ARP senders visible on that interface within explicit IPv4 CIDRs | Expiring MAC/IP observations, including devices absent from DHCP | No |
 | **JSON** | A versioned snapshot written by an external collector | Authoritative bindings or observations, as configured | Optional |
 
 Use one source or combine several. Authoritative bindings take precedence over observations; configured priority resolves differences within each class. Ambiguous address ownership is omitted and reported. **At most one provider may publish DNS.** An identity-only setup makes no DNS configuration calls and preserves previously deployed records.
@@ -26,7 +27,7 @@ flowchart LR
   M["MikroTik provider"] --> C["Validate and merge identities"]
   P["Prometheus provider"] --> C
   J["JSON / external collector"] --> C
-  H["Passive DHCP observations"] --> C
+  H["Passive DHCP and ARP observations"] --> C
   C --> S["Private identity snapshot"]
   S --> Y["YAPD Clients and query aliases"]
   M --> D["Optional owned DNS reconciliation"]
@@ -112,6 +113,7 @@ Choose your providers before starting the worker:
 | Prometheus only | Use the private provider file above and set `IDENTITY_PROVIDERS_FILE`. |
 | Multiple sources | Adapt [providers.example.json](providers.example.json) into your private provider file. |
 | Passive DHCP | Follow [PASSIVE-DHCP.md](PASSIVE-DHCP.md) and add the collector plus its file provider. |
+| Passive ARP | Enable the same collector's ARP option and add its separate `arp` provider; see [PASSIVE-ARP.md](PASSIVE-ARP.md). |
 | External JSON collector | Set `IDENTITY_PROVIDER=json` and `IDENTITY_SOURCE_FILE` to its mounted snapshot path; see the format below. |
 
 For MikroTik, supply `secrets/router-password` and, when required, `secrets/router-ca.pem`. An explicitly trusted router leaf or CA certificate is supported; hostname and certificate validity checks remain enabled. Omit the CA setting only when the router chains to the system trust store. Use an account with only the permissions needed for the REST reads.
@@ -177,6 +179,8 @@ DNS patches preserve unrelated settings and manual overrides. The upstream APIs 
 
 [Passive DHCP](PASSIVE-DHCP.md) learns MACs/names from visible DHCPv4 messages and short-lived IP observations from allowlisted ACKs. It uses an existing LAN access interface without enabling promiscuous mode. Requested addresses are not assignments; lease deadlines expire independently in the bridge and YAPD reader. The first implementation excludes DHCPv6, relays and arbitrary trunk capture. No filtering groups or DNS records are written by this provider.
 
+[Passive ARP](PASSIVE-ARP.md) optionally learns short-lived IPv4 sender/MAC observations on that interface, including devices absent from DHCP. It does not probe, infer hostnames, classify an address as statically configured, or mark devices offline when quiet. Explicit local CIDRs and gateway/proxy MAC exclusions constrain attribution. Separate DHCP and ARP snapshots preserve each protocol's evidence and deadlines. YAPD shows `Observed: ARP` and `Observed: DHCP` tags without inventing query activity.
+
 [Loki notifications](TRIGGERS.md) are optional. Set `IDENTITY_TRIGGER_FILE` to a private configuration based on [trigger.example.json](trigger.example.json). A configurable LogQL query selects events from any vendor; the notifier does not parse MikroTik-specific messages. Matching events request a debounced full reconciliation of the existing providers. Configuration/runtime failures leave regular scheduled sync active. Omit the setting to disable Loki polling.
 
 A [generic authenticated webhook](WEBHOOKS.md) accepts refresh hints from Grafana/Loki alerting, Prometheus Alertmanager and other publishers. It can run alongside direct Loki polling or replace it. Passive file changes refresh local observations using retained authority, without router or Pi-hole API calls; conflicts request authoritative confirmation. A shared short-lived event key coalesces normalized LAN/log/webhook duplicates while periodic full sync remains independent.
@@ -209,7 +213,7 @@ python3 -m unittest discover -s tests -v
 docker build -t yapd-identity-test yapd-patch
 ```
 
-Tests also cover DHCP packet decoding, ACK trust, expiry through cached snapshots, portable Loki notifications and scheduled-sync fallback. Tests cover provider registration and installed entry points, capability enforcement, precedence and conflicts, cache recovery, Prometheus query fixtures and sample freshness, metadata-only DNS preservation, DHCP name injection, expired leases, forwarding loops, CNAME cycles, manual overrides, partial replication, provenance, and aliases. The image build runs the TypeScript tests and compiles the full patched backend.
+Tests also cover DHCP packet decoding, ACK trust, ARP sender attribution and proxy guards, expiry through cached snapshots, portable Loki notifications and scheduled-sync fallback. Tests cover provider registration and installed entry points, capability enforcement, precedence and conflicts, cache recovery, Prometheus query fixtures and sample freshness, metadata-only DNS preservation, DHCP name injection, expired leases, forwarding loops, CNAME cycles, manual overrides, partial replication, provenance, and aliases. The image build runs the TypeScript tests and compiles the full patched backend.
 
 To regenerate patched service files from an unpatched checkout of the pinned YAPD revision:
 

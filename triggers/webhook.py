@@ -22,7 +22,7 @@ class ChangeDeduper:
             from providers.common import MAC
             if not isinstance(network,str) or not network or len(network)>191 or not MAC.fullmatch(mac):
                 return None
-            if action not in ('ack','release','decline','nak'):
+            if action not in ('ack','release','decline','nak','arp'):
                 return None
             ip=str(ipaddress.IPv4Address(value['ip']))
             return json.dumps([network,mac,ip,action])

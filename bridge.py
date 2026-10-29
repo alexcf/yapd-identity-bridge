@@ -110,7 +110,7 @@ def run_local(apply=False):
     DATA.mkdir(mode=0o700, exist_ok=True)
     with (DATA/'bridge.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        result, providers, _ = manager.collect(DATA, atomic, refresh_types={'dhcp'})
+        result, providers, _ = manager.collect(DATA, atomic, refresh_types={'dhcp','arp'})
         if apply:
             atomic(DATA/'inventory.json',result.inventory)
         atomic(DATA/'local-status.json',{'mode':'apply' if apply else 'preview',

@@ -12,7 +12,7 @@ class PassiveWatcher:
     def __init__(self,data,deduper):
         self.data=data
         self.deduper=deduper
-        self.sources=[s for s in registry.configured_providers() if s.type=='dhcp']
+        self.sources=[s for s in registry.configured_providers() if s.type in ('dhcp','arp')]
         self.signatures={}
         self.event_ids={}
 
@@ -25,12 +25,13 @@ class PassiveWatcher:
         now=datetime.datetime.now(datetime.timezone.utc)
         for spec in self.sources:
             try:
-                value=DHCPProvider(spec.config).collect()
+                value=registry.create(spec).collect()
                 signature=hashlib.sha256(json.dumps(value.inventory['devices'],sort_keys=True).encode()).hexdigest()
                 if self.signatures.get(spec.id)==signature:
                     continue
                 self.signatures[spec.id]=signature;local=True
-                path=pathlib.Path(spec.config.get('source_file','/var/lib/yapd-dhcp/observations.json'))
+                default='/var/lib/yapd-dhcp/arp-observations.json' if spec.type=='arp' else '/var/lib/yapd-dhcp/observations.json'
+                path=pathlib.Path(spec.config.get('source_file',default))
                 with path.open('rb') as stream:raw=stream.read(2_000_001)
                 if len(raw)>2_000_000:raise ValueError('Oversized DHCP source')
                 payload=json.loads(raw)
@@ -45,7 +46,7 @@ class PassiveWatcher:
                     duplicate=self.deduper.duplicate(key)
                     mac,ip,action=event['mac'],event['ip'],event['action']
                     known=authority.get(mac)
-                    conflict=(action=='ack' and ((known is not None and ip not in known) or
+                    conflict=(action in ('ack','arp') and ((known is not None and ip not in known) or
                         any(ip in ips and owner!=mac for owner,ips in authority.items())))
                     revoked=(action in ('release','decline','nak') and known and (ip in known or action=='nak'))
                     if not duplicate and (conflict or revoked):

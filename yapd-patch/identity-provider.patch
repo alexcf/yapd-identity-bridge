@@ -98,7 +98,7 @@
  }
 --- /dev/null
 +++ b/apps/api/src/integrations/identity-provider.ts
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,126 @@
 +import { readFileSync } from "node:fs";
 +import { isIP } from "node:net";
 +import type { ClientListItem, ClientsMutationInstanceSource } from "../clients/clients.types";
@@ -115,6 +115,7 @@
 +  stale?: boolean;
 +  expiresAt?: string;
 +  ipExpiresAt?: Record<string, string>;
++  protocols?: ("dhcp" | "arp")[];
 +  sources?: { id: string; type: string; retrievedAt: string; status: string }[];
 +};
 +type Snapshot = { version: number; retrievedAt: string; provider: string; devices: IdentityDevice[] };
@@ -145,6 +146,8 @@
 +          (device.identityKind !== undefined && !["binding", "observation"].includes(device.identityKind)) ||
 +          (device.retrievedAt !== undefined && !Number.isFinite(Date.parse(device.retrievedAt))) ||
 +          (device.expiresAt !== undefined && !Number.isFinite(Date.parse(device.expiresAt))) ||
++          (device.protocols !== undefined && (!Array.isArray(device.protocols) || device.protocols.length > 2 ||
++            device.protocols.some(protocol => !["dhcp", "arp"].includes(protocol)))) ||
 +          (device.ipExpiresAt !== undefined && (device.ipExpiresAt === null || typeof device.ipExpiresAt !== "object" ||
 +            Array.isArray(device.ipExpiresAt) || Object.entries(device.ipExpiresAt).some(([ip, deadline]) =>
 +              !device.ips.includes(ip) || typeof deadline !== "string" || !Number.isFinite(Date.parse(deadline))))) ||
@@ -184,6 +187,7 @@
 +      ? Date.now() - Date.parse(device.retrievedAt) > 15 * 60_000 : stale);
 +    const tags = [...new Set([...(manual?.tags ?? native?.tags ?? []), provider,
 +      ...(device.sources?.map(source => "Source: " + source.type) ?? []),
++      ...(device.protocols?.map(protocol => "Observed: " + protocol.toUpperCase()) ?? []),
 +      observation ? "Observed identity" : device.isStatic ? "DHCP reservation" : "Dynamic lease",
 +      ...(!native ? ["Activity not correlated", "Policy not correlated"] : []),
 +      ...(deviceStale ? [observation ? "Identity data stale" : "DHCP data stale"] : [])])];
@@ -223,7 +227,7 @@
 +}
 --- /dev/null
 +++ b/apps/api/src/integrations/identity-provider.spec.ts
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,69 @@
 +import assert from "node:assert/strict";
 +import test from "node:test";
 +import { mergeExternalClients, mergeExternalAliases, liveExternalDevices, type IdentityDevice } from "./identity-provider";
@@ -283,4 +287,13 @@
 +  const observed: IdentityDevice = { ...device, expiresAt: "2000-01-01T00:00:00Z" };
 +  assert.deepEqual(liveExternalDevices([observed]), []);
 +  assert.deepEqual(mergeExternalClients([], [observed], new Map(), baseline, false), []);
++});
++test("ARP discoveries are visibly observational and do not assert static configuration", () => {
++  const arp: IdentityDevice = { ...device, name: "", active: null, isStatic: null,
++    identityKind: "observation", protocols: ["arp"] };
++  const [row] = mergeExternalClients([], [arp], new Map(), baseline, false, "Passive ARP");
++  assert.ok(row?.tags.includes("Observed: ARP"));
++  assert.ok(row?.tags.includes("Observed identity"));
++  assert.ok(!row?.tags.includes("DHCP reservation"));
++  assert.equal(row?.numQueries, 0);
 +});

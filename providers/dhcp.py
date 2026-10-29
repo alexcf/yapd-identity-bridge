@@ -144,6 +144,7 @@ class ObservationStore:
         devices = []
         for original in self.devices.values():
             device = {**original, 'ips':[ip for ip in original['ips'] if ip not in ambiguous]}
+            device.setdefault('protocols',['dhcp'])
             device['ipExpiresAt'] = {ip:t for ip,t in original['ipExpiresAt'].items() if ip in device['ips']}
             devices.append(device)
         return ProviderResult(inventory={'version':1,'provider':'Passive DHCP',

@@ -10,6 +10,7 @@ The worker separates collection, validation, identity merging, and DNS reconcili
 | `json` | Validated v1 snapshot from another collector | Configurable, default yes | Configurable, default yes |
 | `prometheus` | Instant query with explicit device labels | Never | Never |
 | `dhcp` | Private snapshot from the passive DHCPv4 collector | Never | Never |
+| `arp` | Private snapshot from the same collector's optional ARP observer | Never | Never |
 
 UniFi is an extension point, not an implemented or tested integration. A future adapter should use its documented inventory API and declare only the capabilities its data supports. Alternatively, an external collector can write the JSON format described in the README. Do not fabricate a MAC from an exporter target, router address, IP, or device name.
 
@@ -69,6 +70,8 @@ The factory receives only that source's `config`; reconciliation needs no provid
 ## Passive DHCP and change notifications
 
 See [PASSIVE-DHCP.md](PASSIVE-DHCP.md) for the optional Linux collector and `dhcp` file provider. It emits observations with explicit identity/IP expiration deadlines; cached files do not extend these deadlines. The regular bridge has no capture privileges. The protocol is DHCPv4 over directly visible Ethernet; DHCPv6 and relayed DHCP are outside the initial implementation.
+
+The optional `arp` file provider reads `/var/lib/yapd-dhcp/arp-observations.json` by default (override `source_file`). Enable ARP capture with explicit local IPv4 CIDRs as documented in [PASSIVE-ARP.md](PASSIVE-ARP.md). ARP is observational and can be spoofed. Separate files prevent an ARP sighting from extending DHCP evidence. Providers may include `protocols: ["dhcp", "arp"]` on a device to preserve visible evidence through merging; these labels grant no authority or policy membership.
 
 Optional [Loki change notifications](TRIGGERS.md) have a separate `ChangeNotifier` protocol. Their configurable LogQL selectors are vendor-independent. They trigger full collection/reconciliation and keep periodic sync as fallback; they are not identity providers or policy writers.
 

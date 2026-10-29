@@ -19,7 +19,8 @@ def _builtins():
     from .jsonfile import JsonFileProvider
     from .prometheus import PrometheusProvider
     from .dhcp import DHCPProvider
-    for name, provider in [('mikrotik', MikroTikProvider), ('json', JsonFileProvider), ('prometheus', PrometheusProvider), ('dhcp', DHCPProvider)]:
+    from .arp import ARPProvider
+    for name, provider in [('mikrotik', MikroTikProvider), ('json', JsonFileProvider), ('prometheus', PrometheusProvider), ('dhcp', DHCPProvider), ('arp', ARPProvider)]:
         if name not in _factories:
             register(name, provider)
 
