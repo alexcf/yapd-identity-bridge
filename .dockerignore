@@ -1,0 +1,7 @@
+.git
+.env*
+secrets
+state
+*.log
+__pycache__
+tests

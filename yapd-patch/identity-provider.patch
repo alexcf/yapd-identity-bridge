@@ -1,0 +1,221 @@
+--- a/apps/api/src/clients/clients.service.ts
++++ b/apps/api/src/clients/clients.service.ts
+@@ -1,5 +1,6 @@
+ import { BadGatewayException, BadRequestException, Inject, Injectable } from "@nestjs/common";
+ import type { Request } from "express";
++import { readExternalIdentity, mergeExternalClients } from "../integrations/identity-provider";
+ 
+ import { AuditService } from "../audit/audit.service";
+ import { getRequestIp } from "../common/http/request-context";
+@@ -304,10 +305,13 @@
+     const baselineMetadata = await this.readBaselineMetadata(baseline, locale).catch(() => ({
+       clientsByHwaddr: new Map<string, BaselineClientMetadata>(),
+     }));
+-    const allHwaddrs = [...new Set(snapshots.flatMap((snapshot) => [...snapshot.devicesByHwaddr.keys()]))];
++    const identity = readExternalIdentity();
++    const allHwaddrs = [...new Set([...snapshots.flatMap((snapshot) => [...snapshot.devicesByHwaddr.keys()]), ...identity.devices.map(device => device.mac)])];
+     const supportEntries = await this.loadSupportEntries(allHwaddrs);
+-    const availableTags = await this.loadAvailableTags();
+-    const items = this.buildListedClients(snapshots, baseline.id, baselineMetadata.clientsByHwaddr, supportEntries);
++    let availableTags = await this.loadAvailableTags();
++    const nativeItems = this.buildListedClients(snapshots, baseline.id, baselineMetadata.clientsByHwaddr, supportEntries);
++    const items = mergeExternalClients(nativeItems, identity.devices, supportEntries, this.toSourceSummary(baseline), identity.stale, identity.provider);
++    availableTags = [...new Set([...availableTags, ...items.flatMap(item => item.tags)])].sort();
+     const filteredItems = searchTerm.length > 0 ? items.filter((item) => matchesClientSearch(item, searchTerm)) : items;
+     const tagFilteredItems =
+       excludedTags.length > 0
+@@ -315,7 +319,7 @@
+         : filteredItems;
+     const sortedItems = sortClientItems(tagFilteredItems, query.sortBy, query.sortDirection);
+ 
+-    await this.persistSupportEntries(items, supportEntries);
++    await this.persistSupportEntries(nativeItems, supportEntries);
+ 
+     const totalItems = sortedItems.length;
+     const totalPages = Math.max(1, Math.ceil(totalItems / query.pageSize));
+@@ -354,6 +358,7 @@
+     try {
+       const instances = await this.loadManagedInstances(locale);
+       const targetInstances = this.resolveSaveTargets(instances, dto.targetInstanceIds, locale);
++      if (dto.groups !== undefined || dto.comment !== undefined) await this.guardDHCPPolicyTargets(clients, targetInstances, locale);
+       const baselineGroups =
+         requestedGroupIds.length > 0 ? await this.readBaselineGroups(instances, requestedGroupIds, locale) : null;
+       await this.persistRequestedSupportMetadata(clients, alias, tags);
+@@ -451,6 +456,7 @@
+ 
+     try {
+       const instances = await this.loadManagedInstances(locale);
++      if (dto.groups !== undefined) await this.guardDHCPPolicyTargets([client], instances, locale);
+       const baselineGroups =
+         requestedGroupIds === undefined
+           ? null
+@@ -568,6 +574,17 @@
+       });
+ 
+       throw error;
++    }
++  }
++
++  private async guardDHCPPolicyTargets(clients: string[], instances: ManagedInstanceRecord[], locale: ReturnType<typeof getRequestLocale>) {
++    const imported = new Set(readExternalIdentity().devices.map(device => device.mac));
++    const selected = clients.filter(client => imported.has(client));
++    if (selected.length === 0) return;
++    const { snapshots } = await this.prepareDeviceSnapshotsForList(instances, locale);
++    const observed = new Set(snapshots.flatMap(snapshot => [...snapshot.devicesByHwaddr.keys()]));
++    if (selected.some(client => !observed.has(client))) {
++      throw new BadRequestException("This device is known from an external DHCP inventory, not a Pi-hole-observed MAC. Use an IP-based client policy for routed/VLAN devices; a MAC rule cannot reliably match their DNS traffic. This identity import does not assign policies.");
+     }
+   }
+ 
+--- a/apps/api/src/queries/queries.service.ts
++++ b/apps/api/src/queries/queries.service.ts
+@@ -1,5 +1,6 @@
+ import { BadRequestException, Inject, Injectable, Logger } from "@nestjs/common";
+ import type { Request } from "express";
++import { readExternalIdentity, mergeExternalAliases } from "../integrations/identity-provider";
+ 
+ import { getRequestLocale } from "../common/i18n/locale";
+ import { translateApi } from "../common/i18n/messages";
+@@ -858,11 +859,13 @@
+       }
+     }
+ 
+-    return new Map(
+-      [...aliasByIp.entries()].filter((entry): entry is [string, string] => {
+-        const [, alias] = entry;
+-        return alias !== null;
+-      }),
+-    );
++    const devices = readExternalIdentity().devices.filter(device => device.ips.some(ip => requestedIps.has(ip)));
++    const manual = devices.length ? await this.prisma.clientDevice.findMany({
++      where: { hwaddr: { in: devices.map(device => device.mac) }, alias: { not: null } },
++      select: { hwaddr: true, alias: true },
++    }) : [];
++    return mergeExternalAliases(new Map(
++      [...aliasByIp.entries()].filter((entry): entry is [string, string] => entry[1] !== null),
++    ), devices, new Map(manual.filter(item => Boolean(item.alias)).map(item => [item.hwaddr, item.alias as string])));
+   }
+ }
+--- /dev/null
++++ b/apps/api/src/integrations/identity-provider.ts
+@@ -0,0 +1,89 @@
++import { readFileSync } from "node:fs";
++import { isIP } from "node:net";
++import type { ClientListItem, ClientsMutationInstanceSource } from "../clients/clients.types";
++
++export type IdentityDevice = {
++  mac: string;
++  ips: string[];
++  name: string;
++  network: string;
++  isStatic: boolean;
++  active: boolean;
++};
++type Snapshot = { version: number; retrievedAt: string; provider: string; devices: IdentityDevice[] };
++type Support = { alias: string | null; tags: string[] };
++let lastGood: Snapshot = { version: 1, retrievedAt: "1970-01-01T00:00:00Z", provider: "External DHCP", devices: [] };
++
++export function readExternalIdentity(): Snapshot & { stale: boolean } {
++  const path = process.env.YAPD_IDENTITY_FILE;
++  if (!path) return { ...lastGood, devices: [], stale: true };
++  try {
++    const raw = readFileSync(path, "utf8");
++    if (raw.length > 2_000_000) throw new Error("Identity snapshot too large");
++    const value = JSON.parse(raw) as Snapshot;
++    if (value.version !== 1 || typeof value.provider !== "string" || value.provider.length > 64 || !Array.isArray(value.devices) || value.devices.length > 10000 ||
++        !Number.isFinite(Date.parse(value.retrievedAt))) throw new Error("Invalid identity snapshot");
++    const macs = new Set<string>();
++    const ips = new Set<string>();
++    for (const device of value.devices) {
++      if (!/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(device.mac) || macs.has(device.mac) ||
++          typeof device.name !== "string" || device.name.length > 191 ||
++          typeof device.network !== "string" || !Array.isArray(device.ips) ||
++          device.ips.some(ip => !isIP(ip) || ips.has(ip))) throw new Error("Ambiguous identity snapshot");
++      macs.add(device.mac);
++      device.ips.forEach(ip => ips.add(ip));
++    }
++    lastGood = value;
++  } catch {
++    // Atomic writer retains its previous snapshot on source failure. Keep the
++    // last validated in-process copy too; never make DNS availability depend on it.
++  }
++  return { ...lastGood, stale: Date.now() - Date.parse(lastGood.retrievedAt) > 15 * 60_000 };
++}
++
++export function mergeExternalClients(
++  observed: ClientListItem[], devices: IdentityDevice[], support: Map<string, Support>,
++  baseline: ClientsMutationInstanceSource, stale: boolean, provider = "External DHCP",
++): ClientListItem[] {
++  const owners = new Map(devices.flatMap(device => device.ips.map(ip => [ip, device.mac] as const)));
++  const rows = new Map(observed.map(item => [item.hwaddr, {
++    ...item,
++    // A routed IP seen under the gateway's MAC must not also be attributed to
++    // that gateway when DHCP provides the actual device binding.
++    ips: item.ips.filter(ip => !owners.has(ip) || owners.get(ip) === item.hwaddr),
++  }]));
++  for (const device of devices) {
++    const native = rows.get(device.mac);
++    const manual = support.get(device.mac);
++    const tags = [...new Set([...(manual?.tags ?? native?.tags ?? []), provider,
++      device.isStatic ? "DHCP reservation" : "Dynamic lease",
++      ...(!native ? ["Activity not correlated", "Policy not correlated"] : []), ...(stale ? ["DHCP data stale"] : [])])];
++    rows.set(device.mac, {
++      hwaddr: device.mac,
++      alias: manual?.alias || native?.alias || device.name || null,
++      macVendor: native?.macVendor ?? null,
++      ips: [...new Set([...device.ips, ...(native?.ips ?? [])])],
++      tags,
++      instance: native?.instance ?? { ...baseline, instanceName: provider + " inventory" },
++      visibleInInstances: native?.visibleInInstances ?? [],
++      instanceDetails: native?.instanceDetails ?? [],
++      firstSeen: native?.firstSeen ?? null,
++      lastQuery: native?.lastQuery ?? null,
++      numQueries: native?.numQueries ?? 0,
++      comment: native?.comment ?? `DHCP server: ${device.network}; ${device.active ? "bound" : "not bound"}`,
++      groupIds: native?.groupIds ?? [],
++      groupNames: native?.groupNames ?? [],
++    });
++  }
++  return [...rows.values()];
++}
++
++export function mergeExternalAliases(
++  aliases: Map<string, string>, devices: IdentityDevice[], manual: Map<string, string>,
++): Map<string, string> {
++  for (const device of devices) {
++    const name = manual.get(device.mac) || device.name;
++    if (name) device.ips.forEach(ip => aliases.set(ip, name));
++  }
++  return aliases;
++}
+--- /dev/null
++++ b/apps/api/src/integrations/identity-provider.spec.ts
+@@ -0,0 +1,28 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { mergeExternalClients, mergeExternalAliases, type IdentityDevice } from "./identity-provider";
++
++const device: IdentityDevice = { mac: "AA:BB:CC:DD:EE:01", ips: ["172.16.0.50"], name: "laptop",
++  network: "users", isStatic: false, active: true };
++const baseline = { instanceId: "one", instanceName: "Pi-hole 1" };
++test("DHCP-only clients are visible without invented Pi-hole activity", () => {
++  const [row] = mergeExternalClients([], [device], new Map(), baseline, false);
++  assert.equal(row?.alias, "laptop");
++  assert.deepEqual(row?.visibleInInstances, []);
++  assert.equal(row?.lastQuery, null);
++  assert.ok(row?.tags.includes("Activity not correlated"));
++  assert.deepEqual(row?.groupIds, []);
++  assert.ok(row?.tags.includes("Policy not correlated"));
++});
++test("manual aliases and tags survive a DHCP hostname change", () => {
++  const [row] = mergeExternalClients([], [device], new Map([[device.mac, { alias: "Alex laptop", tags: ["Work"] }]]), baseline, false);
++  assert.equal(row?.alias, "Alex laptop"); assert.ok(row?.tags.includes("Work"));
++});
++test("query aliases follow the current DHCP binding rather than a stale IP alias", () => {
++  const aliases = mergeExternalAliases(new Map([["172.16.0.50", "old device"]]), [device], new Map());
++  assert.equal(aliases.get("172.16.0.50"), "laptop");
++});
++test("stale router data is visible as stale", () => {
++  const [row] = mergeExternalClients([], [device], new Map(), baseline, true);
++  assert.ok(row?.tags.includes("DHCP data stale"));
++});

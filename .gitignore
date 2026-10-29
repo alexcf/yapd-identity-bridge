@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+secrets/
+state/
+*.log
+__pycache__/
+*.pyc
+*.dump
+*.tar*
+node_modules/
