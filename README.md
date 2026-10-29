@@ -2,7 +2,7 @@
 
 A small, self-hosted integration for [YAPD](https://github.com/leufrasiojunior/yadp) and Pi-hole v6. It imports a DHCP-backed device inventory, enriches query-log client names, and reconciles owned local DNS records across the Pi-holes registered in YAPD.
 
-MikroTik RouterOS is the first source adapter. The YAPD adapter consumes a versioned, provider-neutral identity snapshot; a JSON-file source lets another collector supply the same interface. This is an integration plus a small, version-pinned YAPD source patch—not an official plugin API or an upstream-endorsed module.
+Providers use a shared SDK and registry. Built-ins support MikroTik RouterOS, a versioned JSON file, and optional Prometheus observations. Multiple identity sources can be merged with explicit precedence; exactly one provider may publish DNS. UniFi can be added as a provider without changing reconciliation or the YAPD patch. This is an integration plus a small, version-pinned YAPD source patch—not an official plugin API or an upstream-endorsed module.
 
 ## How it works
 
@@ -10,6 +10,7 @@ MikroTik RouterOS is the first source adapter. The YAPD adapter consumes a versi
 flowchart LR
   R[RouterOS REST API: read only] --> M[MikroTik provider]
   J[Another collector: JSON file] --> S[Validated snapshot]
+  P[Prometheus: explicit device labels] --> S
   M --> S
   S --> I[YAPD Clients and query aliases]
   S --> W[Owned DNS reconciliation]
@@ -116,6 +117,7 @@ The worker sends minimal DNS-array patches through YAPD, preserving unrelated se
 
 - `state/status.json`: latest source counts, conflicts, warnings, per-instance application/pending state.
 - `state/inventory.json`: last validated inventory read by YAPD.
+- `state/providers/*.json`: configuration-bound last-good source caches. Preserve these with the ownership manifest.
 - `state/ownership.json`: per-instance owned DNS entries and pending intent.
 - `state/before-*.json`: pre-change topic snapshots for recovery.
 - `docker compose logs --tail=100 identity`: bounded operational log without passwords or full inventories.
@@ -129,7 +131,7 @@ python3 -m unittest discover -s tests -v
 docker build -t yapd-identity-test yapd-patch
 ```
 
-Tests cover conflicting names/IP ownership, DHCP public-name injection, expired leases, forwarding loops, CNAME cycles, manual overrides, borrowed entries, partial replication/reconnection, last-good preservation, client inventory provenance, stale data, and manual query aliases. The image build compiles the patched TypeScript backend.
+Tests cover provider registration, capability enforcement, source priority/conflicts, per-source cache recovery, Prometheus HTTP fixtures and stale samples, metadata-only DNS preservation, conflicting names/IP ownership, DHCP public-name injection, expired leases, forwarding loops, CNAME cycles, manual overrides, borrowed entries, partial replication/reconnection, last-good preservation, client inventory provenance, stale data, and manual query aliases. The image build compiles the patched TypeScript backend.
 
 To regenerate patched source files from a checkout of the pinned upstream revision:
 
@@ -138,3 +140,7 @@ YAPD_SOURCE=/path/to/yadp python3 yapd-patch/prepare_patch.py
 ```
 
 The preparation script checks expected source anchors and fails if they change. See [UPSTREAM.md](UPSTREAM.md) for the proposed upstream integration boundary.
+
+## Extensible providers
+
+See [PROVIDERS.md](PROVIDERS.md) for the provider contract, multi-source configuration, and Prometheus limitations. The default environment-only MikroTik setup remains supported. No Prometheus query is enabled automatically. The repository name is retained for existing links; the core and YAPD snapshot format are provider-neutral.

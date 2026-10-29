@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "router",
+      "type": "mikrotik",
+      "priority": 100,
+      "config": {
+        "url": "https://router.home.arpa/rest",
+        "username": "yapd-readonly",
+        "password_file": "/run/secrets/router-password",
+        "ca_file": "/run/secrets/router-ca.pem",
+        "local_dns_suffix": "home.arpa"
+      }
+    },
+    {
+      "id": "metrics",
+      "type": "prometheus",
+      "priority": 10,
+      "config": {
+        "url": "https://prometheus.home.arpa",
+        "query": "timestamp(network_device_info)",
+        "value_is_timestamp": true,
+        "max_sample_age_seconds": 300,
+        "labels": {
+          "mac": "mac",
+          "ip": "ip",
+          "name": "hostname",
+          "network": "network"
+        }
+      }
+    }
+  ]
+}

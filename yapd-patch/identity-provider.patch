@@ -98,7 +98,7 @@
  }
 --- /dev/null
 +++ b/apps/api/src/integrations/identity-provider.ts
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,108 @@
 +import { readFileSync } from "node:fs";
 +import { isIP } from "node:net";
 +import type { ClientListItem, ClientsMutationInstanceSource } from "../clients/clients.types";
@@ -108,8 +108,12 @@
 +  ips: string[];
 +  name: string;
 +  network: string;
-+  isStatic: boolean;
-+  active: boolean;
++  isStatic: boolean | null;
++  active: boolean | null;
++  identityKind?: "binding" | "observation";
++  retrievedAt?: string;
++  stale?: boolean;
++  sources?: { id: string; type: string; retrievedAt: string; status: string }[];
 +};
 +type Snapshot = { version: number; retrievedAt: string; provider: string; devices: IdentityDevice[] };
 +type Support = { alias: string | null; tags: string[] };
@@ -129,7 +133,12 @@
 +    for (const device of value.devices) {
 +      if (!/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(device.mac) || macs.has(device.mac) ||
 +          typeof device.name !== "string" || device.name.length > 191 ||
-+          typeof device.network !== "string" || !Array.isArray(device.ips) ||
++          typeof device.network !== "string" || device.network.length > 191 || !Array.isArray(device.ips) || device.ips.length > 100 ||
++          (device.identityKind !== undefined && !["binding", "observation"].includes(device.identityKind)) ||
++          (device.retrievedAt !== undefined && !Number.isFinite(Date.parse(device.retrievedAt))) ||
++          (device.sources !== undefined && (!Array.isArray(device.sources) || device.sources.length > 16 ||
++            device.sources.some(source => typeof source.id !== "string" || source.id.length > 64 ||
++              typeof source.type !== "string" || source.type.length > 64 || !Number.isFinite(Date.parse(source.retrievedAt))))) ||
 +          device.ips.some(ip => !isIP(ip) || ips.has(ip))) throw new Error("Ambiguous identity snapshot");
 +      macs.add(device.mac);
 +      device.ips.forEach(ip => ips.add(ip));
@@ -146,7 +155,8 @@
 +  observed: ClientListItem[], devices: IdentityDevice[], support: Map<string, Support>,
 +  baseline: ClientsMutationInstanceSource, stale: boolean, provider = "External DHCP",
 +): ClientListItem[] {
-+  const owners = new Map(devices.flatMap(device => device.ips.map(ip => [ip, device.mac] as const)));
++  const owners = new Map(devices.filter(device => device.identityKind !== "observation")
++    .flatMap(device => device.ips.map(ip => [ip, device.mac] as const)));
 +  const rows = new Map(observed.map(item => [item.hwaddr, {
 +    ...item,
 +    // A routed IP seen under the gateway's MAC must not also be attributed to
@@ -156,9 +166,14 @@
 +  for (const device of devices) {
 +    const native = rows.get(device.mac);
 +    const manual = support.get(device.mac);
++    const observation = device.identityKind === "observation";
++    const deviceStale = device.stale || (device.retrievedAt
++      ? Date.now() - Date.parse(device.retrievedAt) > 15 * 60_000 : stale);
 +    const tags = [...new Set([...(manual?.tags ?? native?.tags ?? []), provider,
-+      device.isStatic ? "DHCP reservation" : "Dynamic lease",
-+      ...(!native ? ["Activity not correlated", "Policy not correlated"] : []), ...(stale ? ["DHCP data stale"] : [])])];
++      ...(device.sources?.map(source => "Source: " + source.type) ?? []),
++      observation ? "Observed identity" : device.isStatic ? "DHCP reservation" : "Dynamic lease",
++      ...(!native ? ["Activity not correlated", "Policy not correlated"] : []),
++      ...(deviceStale ? [observation ? "Identity data stale" : "DHCP data stale"] : [])])];
 +    rows.set(device.mac, {
 +      hwaddr: device.mac,
 +      alias: manual?.alias || native?.alias || device.name || null,
@@ -171,7 +186,9 @@
 +      firstSeen: native?.firstSeen ?? null,
 +      lastQuery: native?.lastQuery ?? null,
 +      numQueries: native?.numQueries ?? 0,
-+      comment: native?.comment ?? `DHCP server: ${device.network}; ${device.active ? "bound" : "not bound"}`,
++      comment: native?.comment ?? (observation
++        ? `Observed identity; network: ${device.network || "unknown"}; lease and activity not verified`
++        : `DHCP server: ${device.network}; ${device.active ? "bound" : "not bound"}`),
 +      groupIds: native?.groupIds ?? [],
 +      groupNames: native?.groupNames ?? [],
 +    });
@@ -184,13 +201,15 @@
 +): Map<string, string> {
 +  for (const device of devices) {
 +    const name = manual.get(device.mac) || device.name;
-+    if (name) device.ips.forEach(ip => aliases.set(ip, name));
++    if (name) device.ips.forEach(ip => {
++      if (manual.has(device.mac) || device.identityKind !== "observation" || !aliases.has(ip)) aliases.set(ip, name);
++    });
 +  }
 +  return aliases;
 +}
 --- /dev/null
 +++ b/apps/api/src/integrations/identity-provider.spec.ts
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,47 @@
 +import assert from "node:assert/strict";
 +import test from "node:test";
 +import { mergeExternalClients, mergeExternalAliases, type IdentityDevice } from "./identity-provider";
@@ -217,5 +236,24 @@
 +});
 +test("stale router data is visible as stale", () => {
 +  const [row] = mergeExternalClients([], [device], new Map(), baseline, true);
++  assert.ok(row?.tags.includes("DHCP data stale"));
++});
++test("metric-only identity is not presented as a bound DHCP lease", () => {
++  const observed: IdentityDevice = { ...device, isStatic: null, active: null, identityKind: "observation",
++    sources: [{ id: "metrics", type: "prometheus", retrievedAt: new Date().toISOString(), status: "fresh" }] };
++  const [row] = mergeExternalClients([], [observed], new Map(), baseline, false, "Prometheus");
++  assert.ok(row?.tags.includes("Observed identity"));
++  assert.ok(row?.tags.includes("Source: prometheus"));
++  assert.ok(!row?.tags.includes("Dynamic lease"));
++  assert.ok(row?.comment?.includes("not verified"));
++  assert.equal(row?.numQueries, 0);
++});
++test("observational aliases preserve existing query names", () => {
++  const observed: IdentityDevice = { ...device, identityKind: "observation" };
++  const aliases = mergeExternalAliases(new Map([[device.ips[0]!, "Pi-hole name"]]), [observed], new Map());
++  assert.equal(aliases.get(device.ips[0]!), "Pi-hole name");
++});
++test("a cached source stays visibly stale when another provider refreshes", () => {
++  const [row] = mergeExternalClients([], [{ ...device, stale: true }], new Map(), baseline, false);
 +  assert.ok(row?.tags.includes("DHCP data stale"));
 +});

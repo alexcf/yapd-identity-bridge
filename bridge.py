@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-way external identity and owned DNS reconciliation for YAPD."""
 import argparse, datetime, fcntl, json, os, pathlib, sys, time
-from providers import mikrotik
+from providers import manager
 DATA = pathlib.Path(os.environ.get('IDENTITY_DATA', '/var/lib/yapd-identity'))
 FIELDS = ('hosts', 'cnameRecords', 'revServers')
 
@@ -44,26 +44,22 @@ def run(apply=False):
     DATA.mkdir(mode=0o700, exist_ok=True)
     with (DATA / 'bridge.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        provider = os.environ.get('IDENTITY_PROVIDER', 'mikrotik')
-        if provider == 'mikrotik':
-            source = mikrotik.router_snapshot()  # Source errors retain the last good state.
-            desired, snapshot, warnings = mikrotik.compile_snapshot(source)
-        elif provider == 'json':
-            from providers.jsonfile import load
-            desired, snapshot, warnings = load()
-            source = {'leases': snapshot['devices'], 'dns': desired['hosts'] + desired['cnameRecords'] + desired['revServers']}
-        else:
-            raise ValueError('Unknown identity provider')
+        result, providers, publish_dns = manager.collect(DATA, atomic)
+        desired, snapshot, warnings = result.dns, result.inventory, result.warnings
         atomic(DATA / 'preview.json', {'dns': desired, 'inventory': snapshot, 'warnings': warnings})
         import client as manage
         state_path = DATA / 'ownership.json'
         state = json.loads(state_path.read_text()) if state_path.exists() else {'nodes': {}}
         report = {'at': snapshot['retrievedAt'], 'mode': 'apply' if apply else 'preview',
-            'leases': len(source['leases']), 'devices': len(snapshot['devices']), 'provider': snapshot['provider'],
-            'static_dns_records': len(source['dns']), 'desired_dns_entries': {k: len(v) for k,v in desired.items()},
-            'warnings': warnings, 'nodes': []}
+            'leases': result.stats.get('leases', 0), 'devices': len(snapshot['devices']), 'provider': snapshot['provider'],
+            'static_dns_records': result.stats.get('static_dns_records', 0), 'desired_dns_entries': {k: len(v) for k,v in desired.items()},
+            'warnings': warnings, 'providers': providers, 'dns_enabled': publish_dns, 'nodes': []}
         if apply:
             atomic(DATA / 'inventory.json', snapshot)
+        if not publish_dns:
+            atomic(DATA / 'status.json', report)
+            print(json.dumps({'mode':report['mode'], 'devices':report['devices'], 'dns_enabled':False}))
+            return 1 if any(p['status'] != 'fresh' for p in providers) else 0
         manage.login()
         try:
             for node in sorted((item for item in manage.instances() if item.get('syncEnabled', True)),
@@ -107,7 +103,7 @@ def run(apply=False):
         print(json.dumps({key: report[key] for key in ['mode','leases','devices','static_dns_records','desired_dns_entries']}))
         print(json.dumps({'nodes': [{k:v for k,v in item.items() if k not in ('conflicts',)} for item in report['nodes']],
                           'warnings': len(warnings), 'conflicts': sum(len(x['conflicts']) for x in report['nodes'])}))
-        return 1 if any(item['status']=='pending' for item in report['nodes']) else 0
+        return 1 if any(item['status']=='pending' for item in report['nodes']) or any(p['status'] != 'fresh' for p in providers) else 0
 
 
 if __name__ == '__main__':

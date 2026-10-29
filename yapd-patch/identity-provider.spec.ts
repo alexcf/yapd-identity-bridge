@@ -26,3 +26,22 @@ test("stale router data is visible as stale", () => {
   const [row] = mergeExternalClients([], [device], new Map(), baseline, true);
   assert.ok(row?.tags.includes("DHCP data stale"));
 });
+test("metric-only identity is not presented as a bound DHCP lease", () => {
+  const observed: IdentityDevice = { ...device, isStatic: null, active: null, identityKind: "observation",
+    sources: [{ id: "metrics", type: "prometheus", retrievedAt: new Date().toISOString(), status: "fresh" }] };
+  const [row] = mergeExternalClients([], [observed], new Map(), baseline, false, "Prometheus");
+  assert.ok(row?.tags.includes("Observed identity"));
+  assert.ok(row?.tags.includes("Source: prometheus"));
+  assert.ok(!row?.tags.includes("Dynamic lease"));
+  assert.ok(row?.comment?.includes("not verified"));
+  assert.equal(row?.numQueries, 0);
+});
+test("observational aliases preserve existing query names", () => {
+  const observed: IdentityDevice = { ...device, identityKind: "observation" };
+  const aliases = mergeExternalAliases(new Map([[device.ips[0]!, "Pi-hole name"]]), [observed], new Map());
+  assert.equal(aliases.get(device.ips[0]!), "Pi-hole name");
+});
+test("a cached source stays visibly stale when another provider refreshes", () => {
+  const [row] = mergeExternalClients([], [{ ...device, stale: true }], new Map(), baseline, false);
+  assert.ok(row?.tags.includes("DHCP data stale"));
+});

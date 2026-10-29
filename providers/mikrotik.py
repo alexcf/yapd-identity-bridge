@@ -1,20 +1,21 @@
 """MikroTik RouterOS REST source provider. GET-only, TLS validation required."""
-import base64, collections, datetime, ipaddress, json, os, re, ssl, urllib.request
+import base64, collections, datetime, ipaddress, json, os, ssl, urllib.parse, urllib.request
 from client import secret
-MAC = re.compile(r'^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$')
-NAME = re.compile(r'^(?=.{1,253}$)[a-z0-9_](?:[a-z0-9_.-]*[a-z0-9_])?$')
-FIELDS = ('hosts', 'cnameRecords', 'revServers')
-SUFFIX = os.environ.get('LOCAL_DNS_SUFFIX', 'home.arpa').strip('.')
-SELF = set(os.environ.get('DNS_SELF_ADDRESSES', '127.0.0.1,::1').split(','))
+from .base import Capabilities, ProviderResult
+from .common import FIELDS, MAC, NoRedirect, valid_name, validate_dns
 
-def router_snapshot():
-    base = os.environ['MIKROTIK_BASE_URL'].rstrip('/')
-    if not base.startswith('https://'):
+def router_snapshot(config=None):
+    config = config or {}
+    base = (config.get('url') or os.environ['MIKROTIK_BASE_URL']).rstrip('/')
+    parsed = urllib.parse.urlsplit(base)
+    if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError('RouterOS HTTPS is required')
-    context = ssl.create_default_context(cafile=os.environ.get('MIKROTIK_CA_FILE') or None)
+    context = ssl.create_default_context(cafile=config.get('ca_file') or os.environ.get('MIKROTIK_CA_FILE') or None)
     context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
-    token = base64.b64encode((os.environ['MIKROTIK_USERNAME'] + ':' + secret('MIKROTIK_PASSWORD')).encode()).decode()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context), NoRedirect())
+    password = __import__('pathlib').Path(config['password_file']).read_text().rstrip('\r\n') if config.get('password_file') else secret('MIKROTIK_PASSWORD')
+    username = config.get('username') or os.environ['MIKROTIK_USERNAME']
+    token = base64.b64encode((username + ':' + password).encode()).decode()
     data = {}
     for name, path in [('leases', 'ip/dhcp-server/lease'), ('dns', 'ip/dns/static')]:
         request = urllib.request.Request(base + '/' + path,
@@ -28,13 +29,10 @@ def router_snapshot():
             raise ValueError('Invalid router inventory')
     return data
 
-def valid_name(value):
-    value = value.rstrip('.').lower()
-    if not NAME.fullmatch(value) or '..' in value or any(len(x) > 63 for x in value.split('.')):
-        return None
-    return value
-
-def compile_snapshot(source):
+def compile_snapshot(source, config=None):
+    config = config or {}
+    SUFFIX = config.get('local_dns_suffix', os.environ.get('LOCAL_DNS_SUFFIX', 'home.arpa')).strip('.')
+    SELF = set(config.get('dns_self_addresses', os.environ.get('DNS_SELF_ADDRESSES', '127.0.0.1,::1').split(',')))
     desired = {field: [] for field in FIELDS}
     warnings = []
     static = collections.defaultdict(set)
@@ -68,7 +66,7 @@ def compile_snapshot(source):
                 raise ValueError('DNS forwarding loop or invalid destination')
             if len(parts) == 2 and not 1 <= int(parts[1]) <= 65535:
                 raise ValueError('Invalid DNS forwarding port')
-            prefixes = json.loads(os.environ.get('FORWARD_REVERSE_CIDRS', '{}'))
+            prefixes = config.get('forward_reverse_cidrs', json.loads(os.environ.get('FORWARD_REVERSE_CIDRS', '{}')))
             if name not in prefixes:
                 warnings.append({'kind': 'forwarder-needs-reverse-cidr', 'name': name})
                 continue
@@ -141,6 +139,21 @@ def compile_snapshot(source):
             seen.add(target)
             target = aliases[target]
     desired = {key: sorted(set(values)) for key, values in desired.items()}
+    validate_dns(desired, SELF)
     snapshot = {'version': 1, 'retrievedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 'provider': 'MikroTik DHCP', 'devices': sorted(devices.values(), key=lambda item: item['mac'])}
     return desired, snapshot, warnings
+
+
+class MikroTikProvider:
+    capabilities = Capabilities(identity=True, dns_records=True, binding_authority=True)
+
+    def __init__(self, config=None):
+        self.config = config or {}
+
+    def collect(self):
+        source = router_snapshot(self.config)
+        desired, inventory, warnings = compile_snapshot(source, self.config)
+        return ProviderResult(inventory=inventory, dns=desired, warnings=warnings,
+                              ambiguous_ips=[w['ip'] for w in warnings if w['kind']=='ambiguous-lease-ip'],
+                              stats={'leases': len(source['leases']), 'static_dns_records': len(source['dns'])})

@@ -9,6 +9,7 @@ from unittest.mock import patch
 from bridge import reconcile_array
 import bridge
 import client
+from providers import mikrotik
 from providers.mikrotik import compile_snapshot
 
 def lease(mac='AA:BB:CC:DD:EE:01', address='192.168.50.20', name='laptop', **extra):
@@ -95,7 +96,7 @@ class ReconciliationTests(unittest.TestCase):
             return {'topic':{'value':dict(values[node][topic])}}
         nodes=[{'id':key,'name':key,'isBaseline':key=='one'} for key in ('one','two')]
         with tempfile.TemporaryDirectory() as tmp, patch.object(bridge,'DATA',pathlib.Path(tmp)), \
-             patch.object(bridge.mikrotik,'router_snapshot',return_value=source), \
+             patch.object(mikrotik,'router_snapshot',return_value=source), \
              patch.object(client,'login'), patch.object(client,'instances',return_value=nodes), patch.object(client,'api',side_effect=api):
             self.assertEqual(bridge.run(True),1)
             status=json.loads((pathlib.Path(tmp)/'status.json').read_text())
@@ -105,7 +106,7 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual(values['one']['dns']['hosts'],values['two']['dns']['hosts'])
             self.assertEqual(values['one']['dns']['upstreams'],['192.0.2.53'])
             before=(pathlib.Path(tmp)/'inventory.json').read_bytes()
-            with patch.object(bridge.mikrotik,'router_snapshot',side_effect=ConnectionError):
+            with patch.object(mikrotik,'router_snapshot',side_effect=ConnectionError):
                 with self.assertRaises(ConnectionError):bridge.run(True)
             self.assertEqual((pathlib.Path(tmp)/'inventory.json').read_bytes(),before)
 
