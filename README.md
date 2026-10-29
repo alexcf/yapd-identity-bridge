@@ -1,50 +1,96 @@
 # YAPD Identity Bridge
 
-A small, self-hosted integration for [YAPD](https://github.com/leufrasiojunior/yadp) and Pi-hole v6. It imports a DHCP-backed device inventory, enriches query-log client names, and reconciles owned local DNS records across the Pi-holes registered in YAPD.
+Bring device identities from **MikroTik, Prometheus, or another inventory collector** into [YAPD](https://github.com/leufrasiojunior/yadp). Show useful device names in Clients and query logs, combine multiple sources with explicit precedence, and optionally replicate local DNS records across Pi-hole v6 instances.
 
-Providers use a shared SDK and registry. Built-ins support MikroTik RouterOS, a versioned JSON file, and optional Prometheus observations. Multiple identity sources can be merged with explicit precedence; exactly one provider may publish DNS. UniFi can be added as a provider without changing reconciliation or the YAPD patch. This is an integration plus a small, version-pinned YAPD source patch—not an official plugin API or an upstream-endorsed module.
+The bridge has a provider SDK, a small reconciliation worker, and a version-pinned YAPD backend patch. Providers collect data; the shared core validates, merges, and publishes it. New sources can be added without changing the dashboard integration.
+
+## Supported sources
+
+| Provider | What it reads | How the data is used | Local DNS publishing |
+| --- | --- | --- | --- |
+| **MikroTik** | DHCP leases and static DNS over RouterOS HTTPS REST | Authoritative lease bindings, device names, local DNS | Yes |
+| **Prometheus** | An instant query against metrics with explicit device labels | Observed identities and supplementary names | No |
+| **JSON** | A versioned snapshot written by an external collector | Authoritative bindings or observations, as configured | Optional |
+
+Use one source or combine several. Authoritative bindings take precedence over observations; configured priority resolves differences within each class. Ambiguous address ownership is omitted and reported. **At most one provider may publish DNS.** An identity-only setup makes no DNS configuration calls and preserves previously deployed records.
+
+MikroTik is the default when using `.env.example` without a provider configuration file. Prometheus is implemented and covered by HTTP fixture tests; it requires your own exporter query and label mapping. No live Prometheus deployment is claimed. UniFi, passive DHCP capture, and Loki/syslog change notifications are future integrations.
+
+See [PROVIDERS.md](PROVIDERS.md) for the SDK, configuration, precedence, and failure handling.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-  R[RouterOS REST API: read only] --> M[MikroTik provider]
-  J[Another collector: JSON file] --> S[Validated snapshot]
-  P[Prometheus: explicit device labels] --> S
-  M --> S
-  S --> I[YAPD Clients and query aliases]
-  S --> W[Owned DNS reconciliation]
-  W --> A[Authenticated YAPD API]
-  A --> P1[Pi-hole v6]
-  A --> P2[Pi-hole v6]
+  M["MikroTik provider"] --> C["Validate and merge identities"]
+  P["Prometheus provider"] --> C
+  J["JSON / external collector"] --> C
+  C --> S["Private identity snapshot"]
+  S --> Y["YAPD Clients and query aliases"]
+  M --> D["Optional owned DNS reconciliation"]
+  J --> D
+  D --> A["Authenticated YAPD API"]
+  A --> P1["Pi-hole v6"]
+  A --> P2["Pi-hole v6"]
 ```
 
-It reads **directly from RouterOS's HTTPS REST API**, not Prometheus. Polling defaults to five minutes. The router account requires only the access needed for REST reads; the service performs only GET requests to DHCP leases and static DNS. It never changes router settings, DHCP options, firewall rules, DNS subscriptions, or filtering groups.
+The worker polls configured providers every five minutes by default. It runs as a non-root Compose service alongside YAPD and shares its inventory directory with the dashboard through a read-only mount. The worker uses Python's standard library; it needs no extra database, message broker, client agent, or packet-capture privileges. Prometheus is only needed if you choose that provider. Existing DNS resolution continues when the worker or dashboard is offline.
 
-The worker runs as a non-root Docker Compose service alongside YAPD. It shares a private snapshot directory with YAPD, mounted read-only in the dashboard container. No extra VM, database, message broker, router script, or client agent is required. Existing Pi-hole DNS and firewall enforcement do not depend on the worker or dashboard being available.
+The MikroTik adapter performs GET requests only. The bridge does not change router settings, DHCP advertisements, firewall rules, subscriptions, or filtering-group assignments.
 
-## Features
+## What you get
 
-- DHCP MAC/IP/name bindings shown in YAPD's Clients page, including devices that have not queried Pi-hole.
-- Imported identities are labelled with their provider. Query counts and timestamps are not fabricated; uncorrelated activity and policy are explicitly tagged.
-- Current DHCP bindings enrich query-log aliases. Manually assigned aliases and tags take priority.
-- Static A/AAAA records, local CNAME syntax, and subtree forwarding rules can be replicated through YAPD.
-- Safe DHCP hostname publication: only short names and the configured local suffix are accepted. Arbitrary public names supplied by DHCP clients are rejected.
-- Explicit static DNS wins over DHCP names. Duplicate/conflicting DHCP names or IP ownership are reported rather than guessed.
-- Ownership manifests preserve manual DNS entries. Only exact entries previously created by this integration can be removed. Identical pre-existing entries are borrowed, not claimed.
-- Preview by default; explicit `--apply` for changes. Intent is persisted before API writes, allowing retries after partial failure.
-- Offline replicas are marked pending and retried. Source errors retain the last successfully applied configuration. Inventory older than 15 minutes is visibly stale.
-- TLS certificate validation, CSRF-protected YAPD requests, file-based secrets, bounded logs, resource limits, and a freshness/replication health check.
+- Provider-labelled device inventory, including DHCP devices that have not queried Pi-hole. Imported names supplement existing manual aliases and tags.
+- Query-log names enriched from current identity bindings. Query counts, activity timestamps, and observed MACs are never invented; uncorrelated activity and policy are labelled.
+- Optional replication of static A/AAAA records, CNAMEs, supported forwarding rules, and safe DHCP-derived local names. Explicit static records take precedence over DHCP names.
+- Ownership tracking that preserves manual DNS entries and removes only exact entries previously created by the bridge. Identical pre-existing records are borrowed, not claimed.
+- Dry-run previews, persisted write intent, read-back verification, pending replica status, and retries after partial failure.
+- Per-source last-good caches, original retrieval timestamps, visible stale data, TLS validation, secret files, resource limits, and bounded operational logs.
 
-## Compatibility
+## Prometheus example
 
-The dashboard patch targets **YAPD 1.0.0**, source revision `df9633ed6ee1941e22eec7a3faaa4b0817dd4459`, with the upstream container pinned by digest. It has been built and exercised with RouterOS 7 REST and Pi-hole Core 6.5 / Web 6.6.1 / FTL 6.8. Review and test the patch against other releases; do not blindly apply it to a different upstream version.
+If an existing exporter exposes a series with device labels such as:
 
-The TypeScript compiler and existing dependencies in the pinned image build the backend patch. The frontend and existing database schema remain unchanged. `yapd-patch/identity-provider.patch` is an upstream-style patch. `yapd-patch/patched/` contains the matching complete source files for the image overlay. Upstream's MIT license is retained in `yapd-patch/UPSTREAM-LICENSE`.
+```text
+network_device_info{mac="AA:BB:CC:DD:EE:01",ip="192.168.50.20",hostname="laptop",network="users"} 1
+```
+
+…the Prometheus provider can turn it into an **observed identity** in YAPD. `network_device_info` is an illustrative metric, not a bundled exporter or a metric this project creates. Generic `up` metrics and exporter `instance` labels do not supply device identity automatically.
+
+For a Prometheus-only setup, put the following in your private `secrets/providers.json`, replacing the URL and query with your actual source:
+
+```json
+{
+  "version": 1,
+  "providers": [{
+    "id": "metrics",
+    "type": "prometheus",
+    "priority": 10,
+    "config": {
+      "url": "https://prometheus.home.arpa",
+      "query": "timestamp(network_device_info)",
+      "value_is_timestamp": true,
+      "max_sample_age_seconds": 300,
+      "labels": {
+        "mac": "mac",
+        "ip": "ip",
+        "name": "hostname",
+        "network": "network"
+      }
+    }
+  }]
+}
+```
+
+Set `IDENTITY_PROVIDERS_FILE=/run/secrets/providers.json` in `.env`. The Compose example mounts `secrets/` read-only at `/run/secrets`. Router credentials and YAPD API login credentials are not required by an identity-only Prometheus worker; the existing dashboard still uses its own authentication.
+
+The adapter calls the supported [Prometheus instant-query API](https://prometheus.io/docs/prometheus/latest/querying/api/#instant-queries). The `timestamp(...)` query above exposes the original sample time as the value, so stale scrapes are not mistaken for fresh identity observations. An info metric's value `1` does not establish that a device is online. Without a valid MAC, an IP-only observation can supplement an existing known binding but cannot create a device row. Metrics never become authoritative leases or publish DNS.
+
+To combine MikroTik and Prometheus, start from [providers.example.json](providers.example.json). For bearer tokens, custom CAs, explicit private-network HTTP opt-in, and other labels, see [PROVIDERS.md](PROVIDERS.md#prometheus). Credentials belong in secret files, not query strings or provider JSON.
 
 ## Deploy
 
-Start with an existing, working HTTPS YAPD deployment connected to your Pi-holes.
+Start with an existing HTTPS YAPD deployment connected to your Pi-holes. The included Compose file is an overlay for that deployment, not a complete replacement stack.
 
 ```sh
 git clone https://github.com/alexcf/yapd-identity-bridge.git
@@ -56,37 +102,46 @@ chmod 600 .env
 docker build -t yapd:identity yapd-patch
 ```
 
-Configure `.env` for your environment. Supply `secrets/router-password`, `secrets/router-ca.pem`, and `secrets/yapd-password`; protect them with mode 0600 and ownership matching the non-root worker UID. The CA file may be an explicitly trusted router leaf or CA certificate; hostname and certificate validity checks remain enabled. Omit the CA setting only when the router already chains to the system trust store. Do not disable TLS validation.
+Choose your providers before starting the worker:
 
-YAPD must be reached over HTTPS so its Secure session cookies work. The worker uses the existing password-only administrator login and current authenticated API; credentials stay server-side. If that password rotates, update its secret file as well. Secrets are re-read each polling cycle.
+| Setup | Configuration |
+| --- | --- |
+| MikroTik only | Configure the `MIKROTIK_*` settings in `.env.example`; no provider file is needed. |
+| Prometheus only | Use the private provider file above and set `IDENTITY_PROVIDERS_FILE`. |
+| Multiple sources | Adapt [providers.example.json](providers.example.json) into your private provider file. |
+| External JSON collector | Set `IDENTITY_PROVIDER=json` and `IDENTITY_SOURCE_FILE` to its mounted snapshot path; see the format below. |
 
-Set `LOCAL_DNS_SUFFIX` and `DNS_SELF_ADDRESSES` to your site. For a forwarding zone, set `FORWARD_REVERSE_CIDRS` to a JSON map of zone to reverse CIDR, for example `{"example.ts.net":"100.64.0.0/10"}`. This also delegates reverse lookups for that CIDR, so review the mapping before applying. Include the Pi-hole node addresses, any DNS VIP/service addresses, and the router address in the latter so direct forwarding loops are rejected. The worker does not discover arbitrary multi-hop DNS loops; verify downstream forwarders before applying.
+For MikroTik, supply `secrets/router-password` and, when required, `secrets/router-ca.pem`. An explicitly trusted router leaf or CA certificate is supported; hostname and certificate validity checks remain enabled. Omit the CA setting only when the router chains to the system trust store. Use an account with only the permissions needed for the REST reads.
 
-Merge `compose.example.yaml` into your YAPD Compose project, adjusting image names, paths, and UID/GID. The example is an overlay, not a complete replacement for the upstream PostgreSQL/YAPD stack. Avoid creating a second dashboard or database accidentally.
+A DNS-publishing setup also needs `YAPD_BASE_URL` and `secrets/yapd-password`. The worker uses YAPD's existing authenticated administrator API over HTTPS, including its CSRF protection and Secure session cookies. Protect secret files with mode 0600 and ownership matching the worker UID. Password files are re-read each polling cycle; update them when credentials rotate.
 
-Preview:
+For MikroTik-derived DNS, configure `LOCAL_DNS_SUFFIX` and `DNS_SELF_ADDRESSES`. Include the router, Pi-hole nodes, VIPs, and service addresses in the latter to reject direct forwarding loops. Subtree forwarders need an explicit `FORWARD_REVERSE_CIDRS` map, for example `{"example.ts.net":"100.64.0.0/10"}`. This delegates reverse lookups for that CIDR too; review the mapping and downstream forwarding path before applying.
+
+Merge [compose.example.yaml](compose.example.yaml) into your YAPD Compose project, adjusting build paths, image names, mounts, and UID/GID. The patched dashboard needs `YAPD_IDENTITY_FILE` and the read-only state mount shown in that example.
+
+Preview before starting the scheduled service:
 
 ```sh
 docker compose run --rm --no-deps identity python bridge.py
 ```
 
-Review the private `state/preview.json`, including conflicts and warnings. Then explicitly apply once:
+Review the private `state/preview.json` and `state/status.json`, including warnings, conflicts, and proposed DNS changes. Then explicitly apply and start reconciliation:
 
 ```sh
 docker compose run --rm --no-deps identity python bridge.py --apply
 docker compose up -d yapd identity
 ```
 
-The normal service command applies and reconciles on a schedule. Start it only after reviewing the first preview. Keep the state directory: losing `ownership.json` loses the knowledge required to safely remove retired imported records. Back up it, the YAPD database, and matching credentials together.
+The service command applies on a schedule. Start it only after reviewing the first preview. Keep and back up the state directory: losing `ownership.json` loses the knowledge needed to safely remove retired imported records. Back up state, the YAPD database, and matching credentials together.
 
-## Other identity providers
+## External collectors and new providers
 
-The dashboard accepts this inventory format through `YAPD_IDENTITY_FILE`:
+The YAPD patch consumes a private v1 inventory snapshot with this shape. Replace the illustrative timestamp with the time of a real successful collection:
 
 ```json
 {
   "version": 1,
-  "provider": "Example DHCP",
+  "provider": "Example inventory",
   "retrievedAt": "2026-01-01T00:00:00+00:00",
   "devices": [{
     "mac": "AA:BB:CC:DD:EE:01",
@@ -99,48 +154,59 @@ The dashboard accepts this inventory format through `YAPD_IDENTITY_FILE`:
 }
 ```
 
-An external collector can publish the `inventory` plus `dns` structure emitted in `preview.json`, then use `IDENTITY_PROVIDER=json` and `IDENTITY_SOURCE_FILE=/path/to/snapshot.json`. Supported DNS arrays are `hosts` (`IP hostname`), `cnameRecords` (`alias,target`), and `revServers` (`true,CIDR,server[#port],zone` entries only). These are destination Pi-hole representations, independent of the source vendor. No other router vendors are implemented here yet.
+For the JSON provider, wrap this as `{"inventory": <snapshot>}` and optionally add `dns` and `warnings`, matching `preview.json`. DNS supports `hosts` (`IP hostname`), `cnameRecords` (`alias,target`), and `revServers` (`true,CIDR,server[#port],zone`). The JSON provider defaults to binding authority and DNS publishing. For an identity-only observational collector, use a provider configuration file with `publish_dns: false` and `binding_authority: false` in its `config` before previewing. Incoming snapshots and state contain private network inventory.
 
-The timestamp must represent an actual successful source read. Do not refresh it while replaying old data. Mount incoming files and state privately; they contain network inventory. The API remains protected by YAPD's existing authentication.
+A new Python adapter implements `IdentityProvider`, declares its capabilities, and returns `ProviderResult`. Register its factory or install a trusted package using the `yapd_identity.providers` entry-point group. See [PROVIDERS.md](PROVIDERS.md#implementing-another-adapter) for the contract and validation rules. Provider packages execute trusted operator code; configuration does not load arbitrary Python module paths.
 
-## Policy and identity boundaries
+## Identity, policy, and current limitations
 
-**Importing a device does not assign a filtering policy.** A MAC provided by DHCP is an inventory identity, not proof that Pi-hole can observe that MAC on a routed DNS packet. The patch prevents MAC-based group mutations on DHCP-only clients when Pi-hole has not observed their MAC. Routed/VLAN device policies need explicit IP-based client rules and stable identity management; automatic DHCP-to-policy migration is outside this integration.
+**Device discovery does not assign a filtering policy.** DHCP MACs describe inventory; routed DNS traffic does not expose those device MACs to Pi-hole. The patch guards against MAC-policy writes for imported devices whose MAC Pi-hole has not observed. Routed clients need explicit IP-based rules; automatic migration of those rules when DHCP changes is not implemented.
 
-IPv6 privacy addresses, devices with static addresses outside DHCP, NAT, VPNs, and encrypted DNS need additional attribution sources. This bridge imports the DHCP records supplied by RouterOS; it does not invent missing IPv6/MAC associations. Native Pi-hole activity may remain uncorrelated for some routed devices. Use query-log client IP/aliases for those devices rather than interpreting a zero inventory counter as proof of no activity.
+A valid lease does not establish online presence. Private MAC rotation creates a separate identity; hostname similarity does not automatically merge devices. IPv6 privacy addresses, static devices outside DHCP, NAT, VPNs, and encrypted DNS can leave gaps in attribution. Query aliases currently use the latest bindings; historical attribution across IP reuse needs timestamped binding history, which is not implemented.
 
-Static record TTLs are not reproduced per entry in Pi-hole's local-host arrays. Regex DNS records and exact-name-only forwarding rules are reported as unsupported. Local CNAME targets must also be resolvable in Pi-hole. Subtree forwarders use Pi-hole’s supported `dns.revServers` API and retain their configured destination servers. Configure `FORWARD_REVERSE_CIDRS` with the corresponding reverse network for each zone; otherwise those rules are reported and skipped. Catch-all reverse networks are rejected. Raw DNSMasq configuration is never written through or around the protected API.
+Source failures preserve last-good state. Partial failures mark cached identities stale; snapshots older than 15 minutes are also labelled stale in YAPD. Cached bindings can become outdated during an outage. The bridge does not yet enforce a maximum attribution lifetime or infer presence from a missing DHCP broadcast.
 
-The worker sends minimal DNS-array patches through YAPD, preserving unrelated settings. Neither upstream API offers a compare-and-swap transaction for those arrays; avoid concurrent manual editing of the same arrays during a sync. Conflicts detected at reconciliation are retained as manual overrides and reported. This is not a general authoritative policy engine or multi-writer database merge system.
+Per-record static TTLs are not preserved in Pi-hole's local-host arrays. Regex DNS records and exact-name-only forwarding are reported as unsupported; CNAME targets must resolve. Supported subtree forwarding uses `dns.revServers`; raw DNSMasq configuration is never written around the protected API. Direct forwarding loops are rejected, but arbitrary multi-hop loops require operator review.
+
+DNS patches preserve unrelated settings and manual overrides. The upstream APIs provide no compare-and-swap transaction for these arrays; avoid concurrent writers to the same settings during reconciliation.
+
+## Planned event notifications
+
+Loki/syslog integration is **not implemented**. The intended addition is to consume DHCP assignment/deassignment events as debounced refresh hints, run the existing authoritative provider again, and keep scheduled polling as recovery from missed events. It would reuse the current validation and reconciliation path.
+
+Event notifications and identity providers have different responsibilities: a notification says when to refresh; a provider supplies validated state. Syslog messages would not directly grant policy, merge device identities, or become a lease database. Passive DHCP capture and a UniFi adapter are also future work.
+
+## Compatibility and verification
+
+The dashboard patch targets **YAPD 1.0.0**, source revision `df9633ed6ee1941e22eec7a3faaa4b0817dd4459`. The upstream container is pinned by digest. The complete path has been exercised with RouterOS 7 REST and Pi-hole Core 6.5 / Web 6.6.1 / FTL 6.8. Prometheus is verified against HTTP fixtures and sample responses; it is not advertised as a tested live exporter integration.
+
+The patch uses the existing backend dependencies, frontend fields, and database schema. It is not an official upstream plugin API. The review branch is [alexcf/yadp:feat/external-identity-provider-20261029](https://github.com/alexcf/yadp/tree/feat/external-identity-provider-20261029); no upstream pull request has been submitted. Review and test against other YAPD releases. See [UPSTREAM.md](UPSTREAM.md).
 
 ## Operations and recovery
 
-- `state/status.json`: latest source counts, conflicts, warnings, per-instance application/pending state.
-- `state/inventory.json`: last validated inventory read by YAPD.
-- `state/providers/*.json`: configuration-bound last-good source caches. Preserve these with the ownership manifest.
-- `state/ownership.json`: per-instance owned DNS entries and pending intent.
-- `state/before-*.json`: pre-change topic snapshots for recovery.
-- `docker compose logs --tail=100 identity`: bounded operational log without passwords or full inventories.
+| File | Purpose |
+| --- | --- |
+| `state/status.json` | Provider freshness, source counts, warnings, and replica application status |
+| `state/inventory.json` | Last validated inventory consumed by YAPD |
+| `state/providers/*.json` | Configuration-bound last-good source caches |
+| `state/ownership.json` | Owned DNS entries and pending write intent |
+| `state/before-*.json` | Topic snapshots taken before changes |
 
-Stop the `identity` service to pause reconciliation; deployed DNS entries remain. To roll back dashboard code, restore the pinned upstream image and remove `YAPD_IDENTITY_FILE`/the read-only inventory mount. To remove imported DNS entries, compare the ownership manifest with current Pi-hole settings and remove only matching owned values through YAPD; preserve manual overrides. Do not restore an entire shared DNS configuration if newer manual edits would be lost.
+Inspect bounded logs with `docker compose logs --tail=100 identity`. Stop the identity service to pause reconciliation; deployed DNS records remain. To roll back dashboard code, restore the pinned upstream image and remove the snapshot environment setting and mount. To remove imported DNS records, compare current values with the ownership manifest and remove only matching owned entries through YAPD. Preserve newer manual changes.
 
-## Test and develop
+## Develop and test
 
 ```sh
 python3 -m unittest discover -s tests -v
 docker build -t yapd-identity-test yapd-patch
 ```
 
-Tests cover provider registration, capability enforcement, source priority/conflicts, per-source cache recovery, Prometheus HTTP fixtures and stale samples, metadata-only DNS preservation, conflicting names/IP ownership, DHCP public-name injection, expired leases, forwarding loops, CNAME cycles, manual overrides, borrowed entries, partial replication/reconnection, last-good preservation, client inventory provenance, stale data, and manual query aliases. The image build compiles the patched TypeScript backend.
+Tests cover provider registration and installed entry points, capability enforcement, precedence and conflicts, cache recovery, Prometheus query fixtures and sample freshness, metadata-only DNS preservation, DHCP name injection, expired leases, forwarding loops, CNAME cycles, manual overrides, partial replication, provenance, and aliases. The image build runs the TypeScript tests and compiles the full patched backend.
 
-To regenerate patched source files from a checkout of the pinned upstream revision:
+To regenerate patched service files from an unpatched checkout of the pinned YAPD revision:
 
 ```sh
 YAPD_SOURCE=/path/to/yadp python3 yapd-patch/prepare_patch.py
 ```
 
-The preparation script checks expected source anchors and fails if they change. See [UPSTREAM.md](UPSTREAM.md) for the proposed upstream integration boundary.
-
-## Extensible providers
-
-See [PROVIDERS.md](PROVIDERS.md) for the provider contract, multi-source configuration, and Prometheus limitations. The default environment-only MikroTik setup remains supported. No Prometheus query is enabled automatically. The core and YAPD snapshot format are provider-neutral.
+The script checks expected source anchors. `yapd-patch/identity-provider.patch` is the matching standalone source patch; `yapd-patch/patched/` supplies complete service files for the image overlay. Upstream's MIT license is retained in `yapd-patch/UPSTREAM-LICENSE`.
