@@ -10,3 +10,5 @@ The small YAPD patch introduces no MikroTik credentials, router requests, new pu
 Suggested upstream work is to formalize the snapshot/provider interface in a NestJS module, expose source freshness/provenance explicitly in the client API/UI, and add supported IP-based policy controls for routed clients. The current patch uses the existing frontend fields and tags, preserving manual aliases and reporting uncorrelated activity/policy rather than fabricating observations.
 
 The supported source baseline is `df9633ed6ee1941e22eec7a3faaa4b0817dd4459` (YAPD 1.0.0). Apply `yapd-patch/identity-provider.patch` to that revision and run the backend tests/build. Upstream acceptance or a native third-party plugin loader is not assumed. This repository does not automatically open upstream issues or pull requests.
+
+The same source patch is published for review on [alexcf/yadp, branch feat/external-identity-provider-20261029](https://github.com/alexcf/yadp/tree/feat/external-identity-provider-20261029). It is based on the tested release revision rather than assuming compatibility with newer upstream changes. No pull request has been submitted to the upstream maintainers.
