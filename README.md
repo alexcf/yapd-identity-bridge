@@ -1,4 +1,4 @@
-# YAPD external identity and MikroTik DNS bridge
+# YAPD Identity Bridge
 
 A small, self-hosted integration for [YAPD](https://github.com/leufrasiojunior/yadp) and Pi-hole v6. It imports a DHCP-backed device inventory, enriches query-log client names, and reconciles owned local DNS records across the Pi-holes registered in YAPD.
 
@@ -47,8 +47,8 @@ The TypeScript compiler and existing dependencies in the pinned image build the 
 Start with an existing, working HTTPS YAPD deployment connected to your Pi-holes.
 
 ```sh
-git clone https://github.com/alexcf/yapd-mikrotik-identity.git
-cd yapd-mikrotik-identity
+git clone https://github.com/alexcf/yapd-identity-bridge.git
+cd yapd-identity-bridge
 cp .env.example .env
 mkdir -p state secrets
 chmod 700 state secrets
@@ -143,4 +143,4 @@ The preparation script checks expected source anchors and fails if they change. 
 
 ## Extensible providers
 
-See [PROVIDERS.md](PROVIDERS.md) for the provider contract, multi-source configuration, and Prometheus limitations. The default environment-only MikroTik setup remains supported. No Prometheus query is enabled automatically. The repository name is retained for existing links; the core and YAPD snapshot format are provider-neutral.
+See [PROVIDERS.md](PROVIDERS.md) for the provider contract, multi-source configuration, and Prometheus limitations. The default environment-only MikroTik setup remains supported. No Prometheus query is enabled automatically. The core and YAPD snapshot format are provider-neutral.
