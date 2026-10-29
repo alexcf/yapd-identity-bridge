@@ -1,0 +1,45 @@
+# Optional overlay for a Linux host with an existing LAN access/VLAN interface.
+services:
+  identity:
+    volumes:
+      - ./dhcp-state:/var/lib/yapd-dhcp:ro
+  dhcp-listener:
+    build: .
+    restart: unless-stopped
+    network_mode: host
+    user: '0:0'
+    environment:
+      DHCP_UID: '${PUID:-1000}'
+      DHCP_GID: '${PGID:-1000}'
+    command:
+      - python
+      - -m
+      - collectors.dhcp_listener
+      - --interface
+      - '${DHCP_INTERFACE:?select a LAN access or VLAN interface}'
+      - --server
+      - '${DHCP_SERVER:?set the DHCP server IPv4 address}'
+      - --network
+      - '${DHCP_NETWORK:-LAN}'
+      - --uid
+      - '${PUID:-1000}'
+      - --gid
+      - '${PGID:-1000}'
+    volumes:
+      - ./dhcp-state:/var/lib/yapd-dhcp
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_RAW, SETUID, SETGID]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    cpus: 0.1
+    pids_limit: 16
+    healthcheck:
+      test: [CMD, python, -m, collectors.healthcheck]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: '2'}

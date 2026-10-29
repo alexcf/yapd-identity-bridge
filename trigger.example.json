@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "type": "loki",
+  "config": {
+    "url": "https://loki.home.arpa",
+    "query": "{job=\"dhcp-logs\"} |= \"DHCP\"",
+    "poll_seconds": 5,
+    "debounce_seconds": 2,
+    "min_sync_interval_seconds": 10
+  }
+}

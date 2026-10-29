@@ -12,11 +12,19 @@ export type IdentityDevice = {
   identityKind?: "binding" | "observation";
   retrievedAt?: string;
   stale?: boolean;
+  expiresAt?: string;
+  ipExpiresAt?: Record<string, string>;
   sources?: { id: string; type: string; retrievedAt: string; status: string }[];
 };
 type Snapshot = { version: number; retrievedAt: string; provider: string; devices: IdentityDevice[] };
 type Support = { alias: string | null; tags: string[] };
 let lastGood: Snapshot = { version: 1, retrievedAt: "1970-01-01T00:00:00Z", provider: "External DHCP", devices: [] };
+
+export function liveExternalDevices(devices: IdentityDevice[], now = Date.now()): IdentityDevice[] {
+  return devices.filter(device => !device.expiresAt || Date.parse(device.expiresAt) > now).map(device => ({
+    ...device, ips: device.ips.filter(ip => !device.ipExpiresAt?.[ip] || Date.parse(device.ipExpiresAt[ip]!) > now),
+  }));
+}
 
 export function readExternalIdentity(): Snapshot & { stale: boolean } {
   const path = process.env.YAPD_IDENTITY_FILE;
@@ -35,6 +43,10 @@ export function readExternalIdentity(): Snapshot & { stale: boolean } {
           typeof device.network !== "string" || device.network.length > 191 || !Array.isArray(device.ips) || device.ips.length > 100 ||
           (device.identityKind !== undefined && !["binding", "observation"].includes(device.identityKind)) ||
           (device.retrievedAt !== undefined && !Number.isFinite(Date.parse(device.retrievedAt))) ||
+          (device.expiresAt !== undefined && !Number.isFinite(Date.parse(device.expiresAt))) ||
+          (device.ipExpiresAt !== undefined && (device.ipExpiresAt === null || typeof device.ipExpiresAt !== "object" ||
+            Array.isArray(device.ipExpiresAt) || Object.entries(device.ipExpiresAt).some(([ip, deadline]) =>
+              !device.ips.includes(ip) || typeof deadline !== "string" || !Number.isFinite(Date.parse(deadline))))) ||
           (device.sources !== undefined && (!Array.isArray(device.sources) || device.sources.length > 16 ||
             device.sources.some(source => typeof source.id !== "string" || source.id.length > 64 ||
               typeof source.type !== "string" || source.type.length > 64 || !Number.isFinite(Date.parse(source.retrievedAt))))) ||
@@ -47,13 +59,14 @@ export function readExternalIdentity(): Snapshot & { stale: boolean } {
     // Atomic writer retains its previous snapshot on source failure. Keep the
     // last validated in-process copy too; never make DNS availability depend on it.
   }
-  return { ...lastGood, stale: Date.now() - Date.parse(lastGood.retrievedAt) > 15 * 60_000 };
+  return { ...lastGood, devices: liveExternalDevices(lastGood.devices), stale: Date.now() - Date.parse(lastGood.retrievedAt) > 15 * 60_000 };
 }
 
 export function mergeExternalClients(
   observed: ClientListItem[], devices: IdentityDevice[], support: Map<string, Support>,
   baseline: ClientsMutationInstanceSource, stale: boolean, provider = "External DHCP",
 ): ClientListItem[] {
+  devices = liveExternalDevices(devices);
   const owners = new Map(devices.filter(device => device.identityKind !== "observation")
     .flatMap(device => device.ips.map(ip => [ip, device.mac] as const)));
   const rows = new Map(observed.map(item => [item.hwaddr, {
@@ -98,6 +111,7 @@ export function mergeExternalClients(
 export function mergeExternalAliases(
   aliases: Map<string, string>, devices: IdentityDevice[], manual: Map<string, string>,
 ): Map<string, string> {
+  devices = liveExternalDevices(devices);
   for (const device of devices) {
     const name = manual.get(device.mac) || device.name;
     if (name) device.ips.forEach(ip => {

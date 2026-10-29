@@ -9,6 +9,7 @@ The worker separates collection, validation, identity merging, and DNS reconcili
 | `mikrotik` | RouterOS HTTPS REST, DHCP leases and static DNS | Yes | Yes |
 | `json` | Validated v1 snapshot from another collector | Configurable, default yes | Configurable, default yes |
 | `prometheus` | Instant query with explicit device labels | Never | Never |
+| `dhcp` | Private snapshot from the passive DHCPv4 collector | Never | Never |
 
 UniFi is an extension point, not an implemented or tested integration. A future adapter should use its documented inventory API and declare only the capabilities its data supports. Alternatively, an external collector can write the JSON format described in the README. Do not fabricate a MAC from an exporter target, router address, IP, or device name.
 
@@ -64,3 +65,11 @@ myprovider = "my_package.provider:MyProvider"
 ```
 
 The factory receives only that source's `config`; reconciliation needs no provider-specific branch. Installed entry points load at startup. Arbitrary module paths from JSON configuration are deliberately unsupported. Capabilities are validated: emitting DNS or observations without declaring them fails collection. Add adapter fixture tests, failure tests and a source-neutral merge test before deployment.
+
+## Passive DHCP and change notifications
+
+See [PASSIVE-DHCP.md](PASSIVE-DHCP.md) for the optional Linux collector and `dhcp` file provider. It emits observations with explicit identity/IP expiration deadlines; cached files do not extend these deadlines. The regular bridge has no capture privileges. The protocol is DHCPv4 over directly visible Ethernet; DHCPv6 and relayed DHCP are outside the initial implementation.
+
+Optional [Loki change notifications](TRIGGERS.md) have a separate `ChangeNotifier` protocol. Their configurable LogQL selectors are vendor-independent. They trigger full collection/reconciliation and keep periodic sync as fallback; they are not identity providers or policy writers.
+
+Local-only observation refreshes mark reused authoritative snapshots `retained` and preserve their retrieval times. They do not query remote providers or reconcile DNS. The daemon requests full confirmation for conflicting or revoked known bindings; scheduled full sync is independent. [WEBHOOKS.md](WEBHOOKS.md) documents optional authenticated hints and cross-source deduplication.

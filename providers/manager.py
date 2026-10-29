@@ -4,10 +4,10 @@ import datetime
 import hashlib
 import json
 from . import registry
-from .common import empty_dns, timestamp, validate_inventory, validate_dns
+from .common import empty_dns, timestamp, validate_inventory, validate_dns, live_device
 from .base import ProviderResult
 
-def collect(data, atomic, specs=None):
+def collect(data, atomic, specs=None, refresh_types=None):
     specs = specs if specs is not None else registry.configured_providers()
     sources, statuses, failures = [], [], []
     dns_sources = 0
@@ -22,9 +22,20 @@ def collect(data, atomic, specs=None):
         cache_path = data / 'providers' / (spec.id + '.json')
         status = {'id':spec.id, 'type':spec.type, 'capabilities':dataclasses.asdict(caps)}
         try:
-            result = adapter.collect().validate(caps)
-            atomic(cache_path, {'fingerprint':fingerprint, 'result':result.to_dict()})
-            status['status'] = 'fresh'
+            if refresh_types is not None and spec.type not in refresh_types:
+                cached = json.loads(cache_path.read_text())
+                if cached['fingerprint'] != fingerprint:
+                    raise ValueError('A full sync is required for changed provider settings')
+                result = ProviderResult.from_dict(cached['result']).validate(caps, allow_stale=True)
+                status['status'] = 'retained'
+                if (data/'status.json').exists():
+                    prior = json.loads((data/'status.json').read_text())
+                    if any(p['id']==spec.id and p['status'] in ('cached','unavailable') for p in prior.get('providers',[])):
+                        status['status'] = 'cached'
+            else:
+                result = adapter.collect().validate(caps)
+                atomic(cache_path, {'fingerprint':fingerprint, 'result':result.to_dict()})
+                status['status'] = 'fresh'
         except Exception as error:
             failures.append(error)
             status.update(status='cached', error_type=type(error).__name__)
@@ -58,6 +69,9 @@ def merge(sources):
     for spec, caps, result, status in sources:
         warnings.extend({**w, 'source':spec.id} for w in result.warnings)
         for device in result.inventory['devices']:
+            device = live_device(device)
+            if device is None:
+                continue
             by_mac.setdefault(device['mac'], []).append((spec, caps, device, status))
     devices, ip_claims = [], {}
     for mac, candidates in sorted(by_mac.items()):
@@ -69,9 +83,20 @@ def merge(sources):
         device = {**base, 'ips':sorted({ip for c in top for ip in c[2]['ips']}),
             'identityKind':'binding' if authoritative else 'observation',
             'retrievedAt':min((c[3]['retrievedAt'] for c in top), key=timestamp),
-            'stale':any(c[3]['status'] != 'fresh' for c in top),
+            'stale':any(c[3]['status'] in ('cached','unavailable') for c in top),
             'sources':[{'id':c[0].id, 'type':c[0].type, 'retrievedAt':c[3]['retrievedAt'],
                         'status':c[3]['status']} for c in sorted(candidates,key=lambda c:c[0].id)]}
+        # Preserve each address's lifetime when equal-priority observers merge.
+        if all(c[2].get('expiresAt') for c in top):
+            device['expiresAt']=max((c[2]['expiresAt'] for c in top),key=timestamp)
+        else:
+            device.pop('expiresAt',None)
+        if any('ipExpiresAt' in c[2] for c in top):
+            deadlines={}
+            for ip in device['ips']:
+                claims=[c[2].get('ipExpiresAt',{}).get(ip) for c in top if ip in c[2]['ips']]
+                if all(claims):deadlines[ip]=max(claims,key=timestamp)
+            device['ipExpiresAt']=deadlines
         for field in ('name', 'network'):
             values = {c[2][field] for c in top if c[2][field]}
             device[field] = next(iter(values)) if len(values) == 1 else ''
@@ -95,6 +120,8 @@ def merge(sources):
             warnings.append({'kind':'ambiguous-provider-ip','ip':ip})
     for device in devices:
         device['ips'] = [ip for ip in device['ips'] if owners.get(ip) == device['mac']]
+        if 'ipExpiresAt' in device:
+            device['ipExpiresAt'] = {ip:t for ip,t in device['ipExpiresAt'].items() if ip in device['ips']}
     # IP-only telemetry may fill a missing display name for an existing binding.
     # It cannot create a MAC, new binding, or DNS record.
     by_owner = {d['mac']:d for d in devices}

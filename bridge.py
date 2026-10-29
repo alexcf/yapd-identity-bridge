@@ -105,18 +105,32 @@ def run(apply=False):
                           'warnings': len(warnings), 'conflicts': sum(len(x['conflicts']) for x in report['nodes'])}))
         return 1 if any(item['status']=='pending' for item in report['nodes']) or any(p['status'] != 'fresh' for p in providers) else 0
 
+def run_local(apply=False):
+    """Refresh observations with retained authority; no network/API/DNS writes."""
+    DATA.mkdir(mode=0o700, exist_ok=True)
+    with (DATA/'bridge.lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result, providers, _ = manager.collect(DATA, atomic, refresh_types={'dhcp'})
+        if apply:
+            atomic(DATA/'inventory.json',result.inventory)
+        atomic(DATA/'local-status.json',{'mode':'apply' if apply else 'preview',
+            'at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'providers':providers,
+            'devices':len(result.inventory['devices']),'dns_reconciled':False})
+        print(json.dumps({'event':'observations_refreshed','devices':len(result.inventory['devices'])}),flush=True)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--daemon', action='store_true')
     args = parser.parse_args()
-    while True:
+    if args.daemon:
+        from daemon import run_forever
+        run_forever(lambda: run(args.apply), int(os.environ.get('SYNC_INTERVAL_SECONDS', '300')),
+                    local_sync=lambda: run_local(args.apply), data=DATA)
+    else:
         try:
-            code = run(args.apply)
+            sys.exit(run(args.apply))
         except Exception as error:
             print('Sync failed safely; last good state retained:', type(error).__name__, flush=True)
-            code = 1
-        if not args.daemon:
-            sys.exit(code)
-        time.sleep(max(60, int(os.environ.get('SYNC_INTERVAL_SECONDS', '300'))))
+            sys.exit(1)

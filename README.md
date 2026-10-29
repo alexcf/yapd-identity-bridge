@@ -1,6 +1,6 @@
 # YAPD Identity Bridge
 
-Bring device identities from **MikroTik, Prometheus, or another inventory collector** into [YAPD](https://github.com/leufrasiojunior/yadp). Show useful device names in Clients and query logs, combine multiple sources with explicit precedence, and optionally replicate local DNS records across Pi-hole v6 instances.
+Bring device identities from **MikroTik, Prometheus, passive DHCP, or another inventory collector** into [YAPD](https://github.com/leufrasiojunior/yadp). Show useful device names in Clients and query logs, combine multiple sources with explicit precedence, and optionally replicate local DNS records across Pi-hole v6 instances.
 
 The bridge has a provider SDK, a small reconciliation worker, and a version-pinned YAPD backend patch. Providers collect data; the shared core validates, merges, and publishes it. New sources can be added without changing the dashboard integration.
 
@@ -10,11 +10,12 @@ The bridge has a provider SDK, a small reconciliation worker, and a version-pinn
 | --- | --- | --- | --- |
 | **MikroTik** | DHCP leases and static DNS over RouterOS HTTPS REST | Authoritative lease bindings, device names, local DNS | Yes |
 | **Prometheus** | An instant query against metrics with explicit device labels | Observed identities and supplementary names | No |
+| **Passive DHCP** | DHCPv4 traffic visible on a Linux LAN interface | Expiring observed MACs, names and allowlisted ACK addresses | No |
 | **JSON** | A versioned snapshot written by an external collector | Authoritative bindings or observations, as configured | Optional |
 
 Use one source or combine several. Authoritative bindings take precedence over observations; configured priority resolves differences within each class. Ambiguous address ownership is omitted and reported. **At most one provider may publish DNS.** An identity-only setup makes no DNS configuration calls and preserves previously deployed records.
 
-MikroTik is the default when using `.env.example` without a provider configuration file. Prometheus is implemented and covered by HTTP fixture tests; it requires your own exporter query and label mapping. No live Prometheus deployment is claimed. UniFi, passive DHCP capture, and Loki/syslog change notifications are future integrations.
+MikroTik is the default when using `.env.example` without a provider configuration file. Prometheus is implemented and covered by HTTP fixture tests; it requires your own exporter query and label mapping. No live Prometheus deployment is claimed. Passive DHCP uses a separate Linux collector with capture privileges; the main worker remains unprivileged. Optional Loki notifications or authenticated webhooks can trigger earlier refreshes with any vendor’s matching events. UniFi remains a future provider.
 
 See [PROVIDERS.md](PROVIDERS.md) for the SDK, configuration, precedence, and failure handling.
 
@@ -25,6 +26,7 @@ flowchart LR
   M["MikroTik provider"] --> C["Validate and merge identities"]
   P["Prometheus provider"] --> C
   J["JSON / external collector"] --> C
+  H["Passive DHCP observations"] --> C
   C --> S["Private identity snapshot"]
   S --> Y["YAPD Clients and query aliases"]
   M --> D["Optional owned DNS reconciliation"]
@@ -34,7 +36,7 @@ flowchart LR
   A --> P2["Pi-hole v6"]
 ```
 
-The worker polls configured providers every five minutes by default. It runs as a non-root Compose service alongside YAPD and shares its inventory directory with the dashboard through a read-only mount. The worker uses Python's standard library; it needs no extra database, message broker, client agent, or packet-capture privileges. Prometheus is only needed if you choose that provider. Existing DNS resolution continues when the worker or dashboard is offline.
+The worker polls configured providers every five minutes by default. It runs as a non-root Compose service alongside YAPD and shares its inventory directory with the dashboard through a read-only mount. The worker uses Python's standard library; it needs no extra database, message broker, client agent, or packet-capture privileges. The optional DHCP collector runs separately with narrowly scoped startup capabilities and drops to a non-root UID before decoding packets. Prometheus is only needed if you choose that provider. Existing DNS resolution continues when the worker or dashboard is offline.
 
 The MikroTik adapter performs GET requests only. The bridge does not change router settings, DHCP advertisements, firewall rules, subscriptions, or filtering-group assignments.
 
@@ -109,6 +111,7 @@ Choose your providers before starting the worker:
 | MikroTik only | Configure the `MIKROTIK_*` settings in `.env.example`; no provider file is needed. |
 | Prometheus only | Use the private provider file above and set `IDENTITY_PROVIDERS_FILE`. |
 | Multiple sources | Adapt [providers.example.json](providers.example.json) into your private provider file. |
+| Passive DHCP | Follow [PASSIVE-DHCP.md](PASSIVE-DHCP.md) and add the collector plus its file provider. |
 | External JSON collector | Set `IDENTITY_PROVIDER=json` and `IDENTITY_SOURCE_FILE` to its mounted snapshot path; see the format below. |
 
 For MikroTik, supply `secrets/router-password` and, when required, `secrets/router-ca.pem`. An explicitly trusted router leaf or CA certificate is supported; hostname and certificate validity checks remain enabled. Omit the CA setting only when the router chains to the system trust store. Use an account with only the permissions needed for the REST reads.
@@ -170,11 +173,15 @@ Per-record static TTLs are not preserved in Pi-hole's local-host arrays. Regex D
 
 DNS patches preserve unrelated settings and manual overrides. The upstream APIs provide no compare-and-swap transaction for these arrays; avoid concurrent writers to the same settings during reconciliation.
 
-## Planned event notifications
+## Passive DHCP and optional event notifications
 
-Loki/syslog integration is **not implemented**. The intended addition is to consume DHCP assignment/deassignment events as debounced refresh hints, run the existing authoritative provider again, and keep scheduled polling as recovery from missed events. It would reuse the current validation and reconciliation path.
+[Passive DHCP](PASSIVE-DHCP.md) learns MACs/names from visible DHCPv4 messages and short-lived IP observations from allowlisted ACKs. It uses an existing LAN access interface without enabling promiscuous mode. Requested addresses are not assignments; lease deadlines expire independently in the bridge and YAPD reader. The first implementation excludes DHCPv6, relays and arbitrary trunk capture. No filtering groups or DNS records are written by this provider.
 
-Event notifications and identity providers have different responsibilities: a notification says when to refresh; a provider supplies validated state. Syslog messages would not directly grant policy, merge device identities, or become a lease database. Passive DHCP capture and a UniFi adapter are also future work.
+[Loki notifications](TRIGGERS.md) are optional. Set `IDENTITY_TRIGGER_FILE` to a private configuration based on [trigger.example.json](trigger.example.json). A configurable LogQL query selects events from any vendor; the notifier does not parse MikroTik-specific messages. Matching events request a debounced full reconciliation of the existing providers. Configuration/runtime failures leave regular scheduled sync active. Omit the setting to disable Loki polling.
+
+A [generic authenticated webhook](WEBHOOKS.md) accepts refresh hints from Grafana/Loki alerting, Prometheus Alertmanager and other publishers. It can run alongside direct Loki polling or replace it. Passive file changes refresh local observations using retained authority, without router or Pi-hole API calls; conflicts request authoritative confirmation. A shared short-lived event key coalesces normalized LAN/log/webhook duplicates while periodic full sync remains independent.
+
+Notifications say when to refresh; providers supply validated state. Neither captured packets nor log messages directly grant permissions or transfer filtering-group membership. [PASSIVE-DHCP.md](PASSIVE-DHCP.md) and [TRIGGERS.md](TRIGGERS.md) cover setup, freshness, limits and verification.
 
 ## Compatibility and verification
 
@@ -187,6 +194,7 @@ The patch uses the existing backend dependencies, frontend fields, and database 
 | File | Purpose |
 | --- | --- |
 | `state/status.json` | Provider freshness, source counts, warnings, and replica application status |
+| `state/local-status.json` | Local-only observation refreshes and retained source timestamps |
 | `state/inventory.json` | Last validated inventory consumed by YAPD |
 | `state/providers/*.json` | Configuration-bound last-good source caches |
 | `state/ownership.json` | Owned DNS entries and pending write intent |
@@ -201,7 +209,7 @@ python3 -m unittest discover -s tests -v
 docker build -t yapd-identity-test yapd-patch
 ```
 
-Tests cover provider registration and installed entry points, capability enforcement, precedence and conflicts, cache recovery, Prometheus query fixtures and sample freshness, metadata-only DNS preservation, DHCP name injection, expired leases, forwarding loops, CNAME cycles, manual overrides, partial replication, provenance, and aliases. The image build runs the TypeScript tests and compiles the full patched backend.
+Tests also cover DHCP packet decoding, ACK trust, expiry through cached snapshots, portable Loki notifications and scheduled-sync fallback. Tests cover provider registration and installed entry points, capability enforcement, precedence and conflicts, cache recovery, Prometheus query fixtures and sample freshness, metadata-only DNS preservation, DHCP name injection, expired leases, forwarding loops, CNAME cycles, manual overrides, partial replication, provenance, and aliases. The image build runs the TypeScript tests and compiles the full patched backend.
 
 To regenerate patched service files from an unpatched checkout of the pinned YAPD revision:
 

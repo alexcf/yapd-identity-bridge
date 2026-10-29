@@ -1,0 +1,5 @@
+# Optional receiver: publish only on the host loopback interface.
+services:
+  identity:
+    ports:
+      - '127.0.0.1:${IDENTITY_WEBHOOK_PORT:-8092}:8092'

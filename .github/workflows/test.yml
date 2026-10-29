@@ -11,7 +11,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m unittest discover -s tests -v
-      - run: python -m compileall -q bridge.py client.py providers
+      - run: python -m compileall -q bridge.py client.py daemon.py providers collectors triggers
   yapd-adapter:
     runs-on: ubuntu-latest
     steps:

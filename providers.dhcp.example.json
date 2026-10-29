@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "providers": [
+    {"id": "router", "type": "mikrotik", "priority": 100, "config": {}},
+    {
+      "id": "lan", "type": "dhcp", "priority": 10,
+      "config": {"source_file": "/var/lib/yapd-dhcp/observations.json"}
+    }
+  ]
+}

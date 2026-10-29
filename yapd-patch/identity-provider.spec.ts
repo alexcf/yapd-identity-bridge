@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mergeExternalClients, mergeExternalAliases, type IdentityDevice } from "./identity-provider";
+import { mergeExternalClients, mergeExternalAliases, liveExternalDevices, type IdentityDevice } from "./identity-provider";
 
 const device: IdentityDevice = { mac: "AA:BB:CC:DD:EE:01", ips: ["172.16.0.50"], name: "laptop",
   network: "users", isStatic: false, active: true };
@@ -44,4 +44,17 @@ test("observational aliases preserve existing query names", () => {
 test("a cached source stays visibly stale when another provider refreshes", () => {
   const [row] = mergeExternalClients([], [{ ...device, stale: true }], new Map(), baseline, false);
   assert.ok(row?.tags.includes("DHCP data stale"));
+});
+test("DHCP observation IP expires even when its collector or the worker has stopped", () => {
+  const now = Date.now();
+  const observed: IdentityDevice = { ...device, identityKind: "observation",
+    expiresAt: new Date(now + 60_000).toISOString(),
+    ipExpiresAt: { [device.ips[0]!]: new Date(now - 1000).toISOString() } };
+  assert.deepEqual(liveExternalDevices([observed], now)[0]?.ips, []);
+  assert.equal(mergeExternalAliases(new Map(), [observed], new Map()).size, 0);
+});
+test("expired passive identity is removed while native Pi-hole history remains", () => {
+  const observed: IdentityDevice = { ...device, expiresAt: "2000-01-01T00:00:00Z" };
+  assert.deepEqual(liveExternalDevices([observed]), []);
+  assert.deepEqual(mergeExternalClients([], [observed], new Map(), baseline, false), []);
 });

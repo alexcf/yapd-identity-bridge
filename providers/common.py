@@ -58,6 +58,25 @@ def validate_inventory(inventory, allow_stale=False):
         for field in ('active', 'isStatic'):
             if device.get(field) is not None and type(device[field]) is not bool:
                 raise ValueError('Invalid identity state')
+        if 'expiresAt' in device:
+            timestamp(device['expiresAt'])
+        deadlines = device.get('ipExpiresAt', {})
+        if not isinstance(deadlines, dict) or len(deadlines) > 100 or set(deadlines)-set(device['ips']):
+            raise ValueError('Invalid observation IP expiry')
+        for deadline in deadlines.values():
+            timestamp(deadline)
+
+def live_device(device, now=None):
+    """Observation deadlines survive cached snapshots and collector outages."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if device.get('expiresAt') and timestamp(device['expiresAt']) <= now:
+        return None
+    deadlines = device.get('ipExpiresAt', {})
+    ips = [ip for ip in device['ips'] if ip not in deadlines or timestamp(deadlines[ip]) > now]
+    result = {**device, 'ips':ips}
+    if 'ipExpiresAt' in device:
+        result['ipExpiresAt'] = {ip:deadlines[ip] for ip in ips if ip in deadlines}
+    return result
 
 def validate_dns(desired, self_addresses=None):
     if not isinstance(desired, dict) or set(desired) != set(FIELDS):

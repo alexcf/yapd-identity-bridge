@@ -3,6 +3,7 @@
 !.env.example
 secrets/
 state/
+dhcp-state/
 *.log
 __pycache__/
 *.pyc
